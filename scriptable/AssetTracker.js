@@ -199,12 +199,69 @@ async function itemMenu(db, row) {
   return false;
 }
 
+async function checkQuotes(db) {
+  await refresh(db);
+  while (true) {
+    const bad = db.items.filter((i) => TYPES.find((t) => t.key === i.type)?.live && !db.cache[i.symbol]);
+    const a = new Alert();
+    a.title = "시세 점검";
+    if (!bad.length) {
+      a.message = "모든 종목의 시세를 정상적으로 가져왔습니다.";
+      a.addAction("확인");
+      await a.presentAlert();
+      return;
+    }
+    a.message = `시세를 못 가져온 종목 ${bad.length}개\n탭해서 심볼을 고치세요. (입력 즉시 조회해서 확인합니다)`;
+    bad.forEach((i) => a.addAction(`${i.account ? i.account + " · " : ""}${i.name}  [${i.symbol || "심볼 없음"}]`));
+    a.addCancelAction("닫기");
+    const idx = await a.presentSheet();
+    if (idx < 0) return;
+    const it = bad[idx];
+
+    while (true) {
+      const inp = new Alert();
+      inp.title = it.name;
+      inp.message = "Yahoo 심볼 입력 (예: 005930.KS, 코스닥은 .KQ, 미국주식은 AAPL)";
+      inp.addTextField("심볼", it.symbol || "");
+      inp.addAction("조회");
+      inp.addCancelAction("건너뛰기");
+      if ((await inp.presentAlert()) < 0) break;
+      const sym = inp.textFieldValue(0).trim().toUpperCase();
+      if (!sym) continue;
+      let q = null;
+      try {
+        q = await yahoo(sym);
+      } catch (e) {}
+      const r = new Alert();
+      if (q) {
+        r.title = "조회 성공";
+        r.message = `${q.name}\n현재가 ${q.price.toLocaleString()} ${q.currency}\n이 심볼로 저장할까요?`;
+        r.addAction("저장");
+        r.addCancelAction("다시 입력");
+        if ((await r.presentAlert()) === 0) {
+          it.symbol = sym;
+          it.price = q.price;
+          db.cache[sym] = q;
+          saveDB(db);
+          break;
+        }
+      } else {
+        r.title = "조회 실패";
+        r.message = `${sym} 의 시세를 가져오지 못했습니다. 심볼을 다시 확인해 주세요.`;
+        r.addAction("확인");
+        await r.presentAlert();
+      }
+    }
+  }
+}
+
 async function toolsMenu(db) {
   const a = new Alert();
   a.title = "도구";
   a.addAction(db.hide ? "금액 표시" : "금액 숨기기");
   a.addAction("JSON 내보내기 (클립보드 복사)");
   a.addAction("JSON 가져오기 (클립보드에서)");
+  a.addAction("시세 점검 (시세 없는 종목 고치기)");
   a.addCancelAction("닫기");
   const r = await a.presentSheet();
   if (r === 0) {
@@ -216,6 +273,8 @@ async function toolsMenu(db) {
     n.title = "복사 완료";
     n.body = "자산 데이터를 클립보드에 복사했습니다.";
     await n.schedule();
+  } else if (r === 3) {
+    await checkQuotes(db);
   } else if (r === 2) {
     try {
       const data = JSON.parse(Pasteboard.paste());
