@@ -411,7 +411,11 @@ function render(table, db) {
       const stale = live && !db.cache[r.it.symbol] ? " · ⚠︎시세없음" : "";
       row.addCell(cell(r.it.name, { sub: `${TYPES.find((t) => t.key === r.it.type)?.label} · 계좌 내 ${accShare}%${stale}`, subColor: COLORS.mute, weight: 5, size: 15 }));
       const dayPct = r.value - r.day ? (r.day / (r.value - r.day)) * 100 : 0;
-      row.addCell(cell(money(r.value, BASE, h), { sub: r.it.type === "cash" || r.it.type === "manual" ? " " : `${pct(dayPct)} · 손익 ${pct(r.cost ? (r.pl / r.cost) * 100 : 0)}`, subColor: colorOf(r.pl), right: true, weight: 6, size: 15 }));
+      const plPct = r.cost ? (r.pl / r.cost) * 100 : 0;
+      const noPrice = r.it.type === "cash" || r.it.type === "manual";
+      // 일간 변동(오늘)은 일간 등락 색, 평가금액/손익은 손익 색으로 따로 표시
+      row.addCell(cell(noPrice ? " " : pct(dayPct), { sub: noPrice ? " " : "오늘", color: colorOf(r.day), subColor: COLORS.mute, right: true, weight: 3, size: 14 }));
+      row.addCell(cell(money(r.value, BASE, h), { sub: noPrice ? " " : `손익 ${pct(plPct)}`, subColor: colorOf(r.pl), right: true, weight: 5, size: 15 }));
       row.onSelect = async () => {
         if (await itemMenu(db, r)) {
           await refresh(db);
