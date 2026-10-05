@@ -279,7 +279,23 @@ async function toolsMenu(db) {
     try {
       const data = JSON.parse(Pasteboard.paste());
       if (!Array.isArray(data.items)) throw new Error("items 없음");
-      db.items = data.items;
+      let mode = 0;
+      if (db.items.length) {
+        const m = new Alert();
+        m.title = "가져오기 방식";
+        m.message = `클립보드: ${data.items.length}개 항목 / 현재: ${db.items.length}개 항목`;
+        m.addAction("기존 목록에 추가 (같은 id는 교체)");
+        m.addDestructiveAction("전체 덮어쓰기");
+        m.addCancelAction("취소");
+        mode = await m.presentSheet();
+        if (mode < 0) return;
+      }
+      if (mode === 0 && db.items.length) {
+        const ids = new Set(data.items.map((i) => i.id));
+        db.items = db.items.filter((i) => !ids.has(i.id)).concat(data.items);
+      } else {
+        db.items = data.items;
+      }
       saveDB(db);
     } catch (e) {
       const err = new Alert();
