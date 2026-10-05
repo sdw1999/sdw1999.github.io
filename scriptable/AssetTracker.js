@@ -91,8 +91,9 @@ function calc(db) {
     const costLocal = (it.type === "cash" ? it.qty : it.avgCost ?? price) * (it.type === "cash" ? 1 : it.qty);
     const value = valueLocal * fx.rate;
     const prevValue = prev * it.qty * fx.prev;
-    // 매입 환율을 모르므로 손익은 현재 환율 기준 환산 (외화 자산의 환차손익은 미포함)
-    const cost = costLocal * fx.rate;
+    // costKRW(원화 환산 매입금액)가 있으면 그대로 사용 (환차손익 포함).
+    // 없으면 매입 환율을 모르므로 현재 환율 기준으로 환산 (환차손익 미포함)
+    const cost = it.costKRW != null ? it.costKRW : costLocal * fx.rate;
     return { it, price, cur, value, cost, day: value - prevValue, pl: value - cost };
   });
   const sum = (k) => rows.reduce((a, r) => a + r[k], 0);
