@@ -244,6 +244,7 @@ function cell(text, opts = {}) {
   return c;
 }
 
+const collapsed = new Set();
 function render(table, db) {
   const s = calc(db);
   const h = db.hide;
@@ -264,23 +265,6 @@ function render(table, db) {
   sub.addCell(cell("오늘", { sub: `${signed(s.day, h)}  (${pct(s.dayPct)})`, color: COLORS.mute, subColor: colorOf(s.day), weight: 1, size: 12 }));
   sub.addCell(cell("평가손익", { sub: `${signed(s.pl, h)}  (${pct(s.plPct)})`, color: COLORS.mute, subColor: colorOf(s.pl), weight: 1, size: 12 }));
   table.addRow(sub);
-
-  if (s.accList.length > 1 || (s.accList[0] && s.accList[0].name !== "기타")) {
-    const title = new UITableRow();
-    title.height = 30;
-    title.addCell(cell("계좌별", { color: COLORS.mute, size: 12, bold: true }));
-    table.addRow(title);
-    for (const a of s.accList) {
-      const row = new UITableRow();
-      row.height = 52;
-      const share = s.total ? ((a.value / s.total) * 100).toFixed(1) : "0.0";
-      const pl = a.value - a.cost;
-      const plPct = a.cost ? (pl / a.cost) * 100 : 0;
-      row.addCell(cell(a.name, { sub: `비중 ${share}%`, subColor: COLORS.mute, weight: 4, bold: true, size: 15 }));
-      row.addCell(cell(money(a.value, BASE, h), { sub: `손익 ${signed(pl, h)} (${pct(plPct)})`, subColor: colorOf(pl), right: true, weight: 7, size: 15 }));
-      table.addRow(row);
-    }
-  }
 
   const bar = new UITableRow();
   bar.height = 48;
@@ -307,25 +291,48 @@ function render(table, db) {
   [add, ref, tools].forEach((c) => bar.addCell(c));
   table.addRow(bar);
 
-  const sorted = [...s.rows].sort((a, b) => b.value - a.value);
-  for (const r of sorted) {
-    const row = new UITableRow();
-    row.height = 64;
-    row.dismissOnSelect = false;
-    const share = s.total ? ((r.value / s.total) * 100).toFixed(1) : "0.0";
-    const stale = TYPES.find((t) => t.key === r.it.type)?.live && !db.cache[r.it.symbol] ? " · ⚠︎시세없음" : "";
-    const acct = r.it.account ? `${r.it.account} · ` : "";
-    row.addCell(cell(r.it.name, { sub: `${acct}${TYPES.find((t) => t.key === r.it.type)?.label} · ${share}%${stale}`, subColor: COLORS.mute, weight: 5, bold: true }));
-    const dayPct = r.value - r.day ? (r.day / (r.value - r.day)) * 100 : 0;
-    row.addCell(cell(money(r.value, BASE, h), { sub: r.it.type === "cash" || r.it.type === "manual" ? " " : `${pct(dayPct)} · 손익 ${pct(r.cost ? (r.pl / r.cost) * 100 : 0)}`, subColor: colorOf(r.pl), right: true, weight: 6, size: 15 }));
-    row.onSelect = async () => {
-      if (await itemMenu(db, r)) {
-        await refresh(db);
-        render(table, db);
-        table.reload();
-      }
+  const sorted = [...s.rows];
+  const rerender = () => {
+    render(table, db);
+    table.reload();
+  };
+  for (const a of s.accList) {
+    const open = !collapsed.has(a.name);
+    const share = s.total ? ((a.value / s.total) * 100).toFixed(1) : "0.0";
+    const apl = a.value - a.cost;
+    const head2 = new UITableRow();
+    head2.height = 60;
+    head2.backgroundColor = Color.dynamic(new Color("#e8eeea"), new Color("#1d2f25"));
+    head2.dismissOnSelect = false;
+    head2.addCell(cell(`${open ? "▾" : "▸"} ${a.name}`, { sub: `비중 ${share}%`, subColor: COLORS.mute, weight: 4, bold: true, size: 16 }));
+    head2.addCell(cell(money(a.value, BASE, h), { sub: `손익 ${signed(apl, h)} (${pct(a.cost ? (apl / a.cost) * 100 : 0)})`, subColor: colorOf(apl), right: true, weight: 7, bold: true, size: 16 }));
+    head2.onSelect = () => {
+      if (collapsed.has(a.name)) collapsed.delete(a.name);
+      else collapsed.add(a.name);
+      rerender();
     };
-    table.addRow(row);
+    table.addRow(head2);
+    if (!open) continue;
+
+    const items = s.rows.filter((r) => (r.it.account || "기타") === a.name).sort((x, y) => y.value - x.value);
+    for (const r of items) {
+      const row = new UITableRow();
+      row.height = 60;
+      row.dismissOnSelect = false;
+      const accShare = a.value ? ((r.value / a.value) * 100).toFixed(1) : "0.0";
+      const live = TYPES.find((t) => t.key === r.it.type)?.live;
+      const stale = live && !db.cache[r.it.symbol] ? " · ⚠︎시세없음" : "";
+      row.addCell(cell(r.it.name, { sub: `${TYPES.find((t) => t.key === r.it.type)?.label} · 계좌 내 ${accShare}%${stale}`, subColor: COLORS.mute, weight: 5, size: 15 }));
+      const dayPct = r.value - r.day ? (r.day / (r.value - r.day)) * 100 : 0;
+      row.addCell(cell(money(r.value, BASE, h), { sub: r.it.type === "cash" || r.it.type === "manual" ? " " : `${pct(dayPct)} · 손익 ${pct(r.cost ? (r.pl / r.cost) * 100 : 0)}`, subColor: colorOf(r.pl), right: true, weight: 6, size: 15 }));
+      row.onSelect = async () => {
+        if (await itemMenu(db, r)) {
+          await refresh(db);
+          rerender();
+        }
+      };
+      table.addRow(row);
+    }
   }
 
   if (!sorted.length) {
