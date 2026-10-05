@@ -29,13 +29,13 @@ const fm = FileManager.iCloud();
 const path = fm.joinPath(fm.documentsDirectory(), FILE);
 
 async function loadDB() {
-  if (!fm.fileExists(path)) return { items: [], cache: {}, fx: {}, hide: false, updated: null };
+  if (!fm.fileExists(path)) return { items: [], cache: {}, fx: {}, hide: false, updated: null, history: [] };
   if (fm.isFileStoredIniCloud(path) && !fm.isFileDownloaded(path)) await fm.downloadFileFromiCloud(path);
   try {
     const db = JSON.parse(fm.readString(path));
-    return Object.assign({ items: [], cache: {}, fx: {}, hide: false, updated: null }, db);
+    return Object.assign({ items: [], cache: {}, fx: {}, hide: false, updated: null, history: [] }, db);
   } catch (e) {
-    return { items: [], cache: {}, fx: {}, hide: false, updated: null };
+    return { items: [], cache: {}, fx: {}, hide: false, updated: null, history: [] };
   }
 }
 function saveDB(db) {
@@ -59,14 +59,17 @@ async function refresh(db) {
   const syms = [...new Set(db.items.filter((i) => TYPES.find((t) => t.key === i.type)?.live && i.symbol).map((i) => i.symbol))];
   const curs = [...new Set(db.items.map((i) => i.currency).filter((c) => c && c !== BASE))];
   const jobs = [];
+  let symFail = 0, fxFail = 0;
   for (const s of syms) {
-    jobs.push(yahoo(s).then((q) => (db.cache[s] = q)).catch(() => {}));
+    jobs.push(yahoo(s).then((q) => (db.cache[s] = q)).catch(() => symFail++));
   }
   for (const c of curs) {
-    jobs.push(yahoo(`${c}${BASE}=X`).then((q) => (db.fx[c] = { rate: q.price, prev: q.prev })).catch(() => {}));
+    jobs.push(yahoo(`${c}${BASE}=X`).then((q) => (db.fx[c] = { rate: q.price, prev: q.prev })).catch(() => fxFail++));
   }
   await Promise.all(jobs);
   db.updated = new Date().toISOString();
+  // 시세 조회가 대부분 성공했을 때만 이번 달 스냅샷을 갱신 (실패한 값이 기록에 남지 않도록)
+  if (db.items.length && fxFail === 0 && symFail <= Math.floor(syms.length * 0.2)) recordSnapshot(db);
   saveDB(db);
 }
 
@@ -133,6 +136,47 @@ function money(n, cur = BASE, hide = false) {
 const signed = (n, hide) => (hide ? "••••" : (n >= 0 ? "+" : "-") + money(Math.abs(n)));
 const pct = (n) => (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
 const colorOf = (n) => (n > 0 ? COLORS.up : n < 0 ? COLORS.down : COLORS.mute);
+
+// ---------- 월별 기록 ----------
+const monthKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+
+// 이번 달 스냅샷을 만들거나 덮어씀 (월말에 가장 가까운 마지막 갱신값이 남음)
+function recordSnapshot(db) {
+  const a = analyze(db);
+  const cls = {}, acct = {};
+  a.classes.forEach((c) => (cls[c.name] = Math.round(c.value)));
+  a.accounts.forEach((c) => (acct[c.name] = Math.round(c.value)));
+  const snap = { m: monthKey(), d: new Date().toISOString(), total: Math.round(a.total), cost: Math.round(a.cost), cls, acct };
+  db.history = (db.history || []).filter((h) => h.m !== snap.m).concat(snap).sort((x, y) => (x.m < y.m ? -1 : 1));
+}
+
+async function editHistory(db) {
+  const al = new Alert();
+  al.title = "월별 기록 추가/수정";
+  al.message = "과거 월의 자산을 직접 기입하거나 수정합니다. (같은 월이 있으면 덮어씁니다)";
+  al.addTextField("월 (예: 2026-06)", "");
+  al.addTextField("총 평가금액 (원)", "");
+  al.addTextField("투자원금 (원, 선택)", "");
+  al.addAction("저장");
+  al.addCancelAction("취소");
+  if ((await al.presentAlert()) < 0) return;
+  const m = al.textFieldValue(0).trim();
+  const num = (t) => parseFloat(t.replace(/,/g, ""));
+  const total = num(al.textFieldValue(1));
+  const cost = num(al.textFieldValue(2));
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(m) || isNaN(total)) {
+    const e = new Alert();
+    e.title = "입력 확인";
+    e.message = "월은 2026-06 형식, 총 평가금액은 숫자로 입력해 주세요.";
+    e.addAction("확인");
+    await e.presentAlert();
+    return;
+  }
+  const prev = (db.history || []).find((h) => h.m === m) || {};
+  const snap = Object.assign({}, prev, { m, d: prev.d || new Date().toISOString(), total: Math.round(total), cost: isNaN(cost) ? prev.cost ?? Math.round(total) : Math.round(cost), manual: true });
+  db.history = (db.history || []).filter((h) => h.m !== m).concat(snap).sort((x, y) => (x.m < y.m ? -1 : 1));
+  saveDB(db);
+}
 
 // ---------- 자산 분류 / 분석 ----------
 const CLS_COLOR = { 국내주식: "#2f6fdb", 해외주식: "#12a594", 채권: "#8f6bd8", 금: "#e0a31a", 현금성: "#8a9a94" };
@@ -252,16 +296,49 @@ h1{font-size:22px;margin:4px 0 12px}h2{font-size:15px;margin:0 0 10px;color:var(
 .lg{display:grid;grid-template-columns:14px 1fr auto;gap:2px 8px;align-items:center;padding:6px 0;border-top:1px solid var(--line)}
 .lg i{width:12px;height:12px;border-radius:3px}.lg .r{font-weight:700}.lg small{grid-column:2/4;color:var(--mute)}
 .bar{margin:8px 0}.bl{display:flex;justify-content:space-between;font-size:14px}.bt{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:3px}.bf{height:100%;border-radius:4px;background:var(--bar)}
+.mute{color:var(--mute);font-size:13px;margin:6px 0}.trend{width:100%;height:auto;display:block}.ax{fill:var(--mute);font-size:9px}h2 small{font-weight:400;font-size:11px}.tr{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr;gap:4px;padding:6px 0;border-top:1px solid var(--line);font-size:13px;text-align:right}.tr span:first-child{text-align:left}.th{color:var(--mute);font-size:12px}.up{color:#d32f2f}.dn{color:#1976d2}@media(prefers-color-scheme:dark){.up{color:#ff6b6b}.dn{color:#64b5f6}}
 .ins{padding:8px 0;border-top:1px solid var(--line)}.ins:first-of-type{border-top:0}.ins b{font-size:14px}.ins p{margin:2px 0 0;color:var(--fg)}
 </style></head><body>
 <h1>포트폴리오 분석</h1>
 <div class="card"><h2>자산군별 비중</h2>${donut}${legend}</div>
+${trendCard(db)}
 <div class="card"><h2>주식 지역별 (전체 대비)</h2>${bars(a.regions, maxOf(a.regions), "#12a594")}</div>
 <div class="card"><h2>계좌별</h2>${bars(a.accounts, maxOf(a.accounts), "#2f6fdb")}</div>
 <div class="card"><h2>절세계좌 / 일반계좌</h2>${bars(a.tax, maxOf(a.tax), "#8f6bd8")}</div>
 <div class="card"><h2>상위 보유 종목 (모든 계좌 합산)</h2>${bars(a.holdings.slice(0, 8), maxOf(a.holdings.slice(0, 8)), "#e0a31a")}</div>
 <div class="card"><h2>평가</h2>${ins}</div>
 </body></html>`;
+}
+
+function trendCard(db) {
+  const h = (db.history || []).slice(-24);
+  if (h.length < 2) {
+    return `<div class="card"><h2>월별 자산 추이</h2><p class="mute">${h.length ? "다음 달부터 추이가 표시됩니다." : "아직 기록이 없습니다."} 앱을 열 때마다 이번 달 값이 자동으로 기록되고, 과거 월은 ⋯ 도구 → 월별 기록 추가에서 직접 넣을 수 있습니다.</p></div>`;
+  }
+  const hide = db.hide;
+  const W = 340, H = 170, pl = 8, pr = 8, pt = 12, pb = 24;
+  const vals = h.flatMap((x) => [x.total, x.cost || x.total]);
+  const lo = Math.min(...vals) * 0.96, hi = Math.max(...vals) * 1.03;
+  const X = (i) => pl + (i * (W - pl - pr)) / (h.length - 1);
+  const Y = (v) => pt + (1 - (v - lo) / (hi - lo)) * (H - pt - pb);
+  const line = (key) => h.map((x, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(x[key] || x.total).toFixed(1)}`).join(" ");
+  const area = `${line("total")} L${X(h.length - 1).toFixed(1)} ${H - pb} L${X(0).toFixed(1)} ${H - pb} Z`;
+  const step = Math.ceil(h.length / 6);
+  const labels = h.map((x, i) => (i % step === 0 || i === h.length - 1 ? `<text x="${X(i).toFixed(1)}" y="${H - 6}" text-anchor="${i === 0 ? "start" : i === h.length - 1 ? "end" : "middle"}" class="ax">${x.m.slice(2).replace("-", ".")}</text>` : "")).join("");
+  const dots = h.map((x, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(x.total).toFixed(1)}" r="3" fill="#12a594"/>`).join("");
+  const svg = `<svg viewBox="0 0 ${W} ${H}" class="trend"><path d="${area}" fill="#12a594" opacity=".12"/><path d="${line("cost")}" fill="none" stroke="#8a9a94" stroke-width="1.5" stroke-dasharray="4 3"/><path d="${line("total")}" fill="none" stroke="#12a594" stroke-width="2.5"/>${dots}${labels}</svg>`;
+  const rows = h.slice(-12).reverse().map((x, i, arr) => {
+    const idx = h.length - 1 - i;
+    const prev = h[idx - 1];
+    const chg = prev ? x.total - prev.total : null;
+    const chgPct = prev && prev.total ? (chg / prev.total) * 100 : null;
+    const pl = x.cost ? x.total - x.cost : 0;
+    const cls = chg == null ? "" : chg > 0 ? "up" : chg < 0 ? "dn" : "";
+    return `<div class="tr"><span>${x.m}${x.manual ? " ✎" : ""}</span><span>${hide ? "••••" : shortWon(x.total)}</span><span class="${cls}">${chgPct == null ? "-" : (chgPct >= 0 ? "+" : "") + chgPct.toFixed(1) + "%"}</span><span class="${pl > 0 ? "up" : pl < 0 ? "dn" : ""}">${x.cost ? (pl >= 0 ? "+" : "") + ((pl / x.cost) * 100).toFixed(1) + "%" : "-"}</span></div>`;
+  }).join("");
+  const first = h[0], last = h[h.length - 1];
+  const tot = first.total ? ((last.total / first.total - 1) * 100).toFixed(1) : "0";
+  return `<div class="card"><h2>월별 자산 추이 <small>(실선 평가액 · 점선 투자원금)</small></h2>${svg}<p class="mute">${first.m} → ${last.m}: ${hide ? "" : shortWon(first.total) + " → " + shortWon(last.total) + " "}(${Number(tot) >= 0 ? "+" : ""}${tot}%)</p><div class="tr th"><span>월</span><span>평가액</span><span>전월 대비</span><span>수익률</span></div>${rows}</div>`;
 }
 
 async function showReport(db) {
@@ -407,39 +484,50 @@ async function toolsMenu(db) {
   a.addAction("JSON 내보내기 (클립보드 복사)");
   a.addAction("JSON 가져오기 (클립보드에서)");
   a.addAction("시세 점검 (시세 없는 종목 고치기)");
+  a.addAction("월별 기록 추가/수정");
   a.addCancelAction("닫기");
   const r = await a.presentSheet();
   if (r === 0) {
     db.hide = !db.hide;
     saveDB(db);
   } else if (r === 1) {
-    Pasteboard.copy(JSON.stringify({ items: db.items }, null, 2));
+    Pasteboard.copy(JSON.stringify({ items: db.items, history: db.history || [] }, null, 2));
     const n = new Notification();
     n.title = "복사 완료";
     n.body = "자산 데이터를 클립보드에 복사했습니다.";
     await n.schedule();
   } else if (r === 3) {
     await checkQuotes(db);
+  } else if (r === 4) {
+    await editHistory(db);
   } else if (r === 2) {
     try {
       const data = JSON.parse(Pasteboard.paste());
-      if (!Array.isArray(data.items)) throw new Error("items 없음");
-      let mode = 0;
-      if (db.items.length) {
-        const m = new Alert();
-        m.title = "가져오기 방식";
-        m.message = `클립보드: ${data.items.length}개 항목 / 현재: ${db.items.length}개 항목`;
-        m.addAction("기존 목록에 추가 (같은 id는 교체)");
-        m.addDestructiveAction("전체 덮어쓰기");
-        m.addCancelAction("취소");
-        mode = await m.presentSheet();
-        if (mode < 0) return;
+      const hasItems = Array.isArray(data.items);
+      const hasHist = Array.isArray(data.history);
+      if (!hasItems && !hasHist) throw new Error("items/history 없음");
+      if (hasItems) {
+        let mode = 0;
+        if (db.items.length) {
+          const m = new Alert();
+          m.title = "가져오기 방식";
+          m.message = `클립보드: ${data.items.length}개 항목 / 현재: ${db.items.length}개 항목`;
+          m.addAction("기존 목록에 추가 (같은 id는 교체)");
+          m.addDestructiveAction("전체 덮어쓰기");
+          m.addCancelAction("취소");
+          mode = await m.presentSheet();
+          if (mode < 0) return;
+        }
+        if (mode === 0 && db.items.length) {
+          const ids = new Set(data.items.map((i) => i.id));
+          db.items = db.items.filter((i) => !ids.has(i.id)).concat(data.items);
+        } else {
+          db.items = data.items;
+        }
       }
-      if (mode === 0 && db.items.length) {
-        const ids = new Set(data.items.map((i) => i.id));
-        db.items = db.items.filter((i) => !ids.has(i.id)).concat(data.items);
-      } else {
-        db.items = data.items;
+      if (hasHist) {
+        const keep = (db.history || []).filter((h) => !data.history.some((x) => x.m === h.m));
+        db.history = keep.concat(data.history).sort((x, y) => (x.m < y.m ? -1 : 1));
       }
       saveDB(db);
     } catch (e) {
