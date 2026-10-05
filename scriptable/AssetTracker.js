@@ -112,6 +112,16 @@ function calc(db) {
   return { accList, rows, total, cost, day, pl: total - cost, dayPct: total - day ? (day / (total - day)) * 100 : 0, plPct: cost ? ((total - cost) / cost) * 100 : 0 };
 }
 
+// 시장 구분: 국내주식 / 해외주식 / 코인 / 기타 / 현금 (심볼·통화로 자동 판별)
+const GROUPS = ["국내주식", "해외주식", "코인", "기타", "현금"];
+function marketOf(it) {
+  if (it.type === "cash") return "현금";
+  if (it.type === "manual") return "기타";
+  if (it.type === "crypto") return "코인";
+  const domestic = (it.currency || BASE) === BASE && /\.(KS|KQ)$/i.test(it.symbol || "");
+  return domestic ? "국내주식" : "해외주식";
+}
+
 // ---------- 포맷 ----------
 function money(n, cur = BASE, hide = false) {
   if (hide) return "••••••";
@@ -390,8 +400,9 @@ function render(table, db) {
     table.addRow(head2);
     if (!open) continue;
 
-    const items = s.rows.filter((r) => (r.it.account || "기타") === a.name).sort((x, y) => y.value - x.value);
-    for (const r of items) {
+    const accRows = s.rows.filter((r) => (r.it.account || "기타") === a.name);
+    const split = accRows.some((r) => marketOf(r.it) === "해외주식");
+    const addItemRow = (r) => {
       const row = new UITableRow();
       row.height = 60;
       row.dismissOnSelect = false;
@@ -408,6 +419,18 @@ function render(table, db) {
         }
       };
       table.addRow(row);
+    };
+    for (const g of split ? GROUPS : [null]) {
+      const rows = accRows.filter((r) => g === null || marketOf(r.it) === g).sort((x, y) => y.value - x.value);
+      if (!rows.length) continue;
+      if (g) {
+        const sub = new UITableRow();
+        sub.height = 34;
+        sub.addCell(cell(`  ${g}`, { color: COLORS.mute, bold: true, size: 13, weight: 4 }));
+        sub.addCell(cell(money(rows.reduce((t, r) => t + r.value, 0), BASE, h), { color: COLORS.mute, size: 13, right: true, weight: 7 }));
+        table.addRow(sub);
+      }
+      rows.forEach(addItemRow);
     }
   }
 
