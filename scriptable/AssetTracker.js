@@ -99,7 +99,16 @@ function calc(db) {
   const total = sum("value");
   const cost = sum("cost");
   const day = sum("day");
-  return { rows, total, cost, day, pl: total - cost, dayPct: total - day ? (day / (total - day)) * 100 : 0, plPct: cost ? ((total - cost) / cost) * 100 : 0 };
+  const accounts = {};
+  for (const r of rows) {
+    const k = r.it.account || "기타";
+    const a = (accounts[k] = accounts[k] || { name: k, value: 0, cost: 0, day: 0 });
+    a.value += r.value;
+    a.cost += r.cost;
+    a.day += r.day;
+  }
+  const accList = Object.values(accounts).sort((a, b) => b.value - a.value);
+  return { accList, rows, total, cost, day, pl: total - cost, dayPct: total - day ? (day / (total - day)) * 100 : 0, plPct: cost ? ((total - cost) / cost) * 100 : 0 };
 }
 
 // ---------- 포맷 ----------
@@ -256,6 +265,23 @@ function render(table, db) {
   sub.addCell(cell("평가손익", { sub: `${signed(s.pl, h)}  (${pct(s.plPct)})`, color: COLORS.mute, subColor: colorOf(s.pl), weight: 1, size: 12 }));
   table.addRow(sub);
 
+  if (s.accList.length > 1 || (s.accList[0] && s.accList[0].name !== "기타")) {
+    const title = new UITableRow();
+    title.height = 30;
+    title.addCell(cell("계좌별", { color: COLORS.mute, size: 12, bold: true }));
+    table.addRow(title);
+    for (const a of s.accList) {
+      const row = new UITableRow();
+      row.height = 52;
+      const share = s.total ? ((a.value / s.total) * 100).toFixed(1) : "0.0";
+      const pl = a.value - a.cost;
+      const plPct = a.cost ? (pl / a.cost) * 100 : 0;
+      row.addCell(cell(a.name, { sub: `비중 ${share}%`, subColor: COLORS.mute, weight: 4, bold: true, size: 15 }));
+      row.addCell(cell(money(a.value, BASE, h), { sub: `손익 ${signed(pl, h)} (${pct(plPct)})`, subColor: colorOf(pl), right: true, weight: 7, size: 15 }));
+      table.addRow(row);
+    }
+  }
+
   const bar = new UITableRow();
   bar.height = 48;
   const add = UITableCell.button("＋ 추가");
@@ -339,20 +365,26 @@ function buildWidget(db) {
   p.font = Font.mediumSystemFont(12);
   p.textColor = colorOf(s.pl);
 
+  const addLine = (name, value, color) => {
+    const line = w.addStack();
+    const n = line.addText(name);
+    n.font = Font.systemFont(12);
+    n.lineLimit = 1;
+    line.addSpacer();
+    const v = line.addText(money(value, BASE, h));
+    v.font = Font.systemFont(12);
+    v.textColor = color;
+  };
   if (config.widgetFamily !== "small") {
     w.addSpacer(8);
-    [...s.rows]
-      .sort((a, b) => b.value - a.value)
-      .slice(0, config.widgetFamily === "large" ? 8 : 3)
-      .forEach((r) => {
-        const line = w.addStack();
-        const n = line.addText(r.it.name);
-        n.font = Font.systemFont(12);
-        line.addSpacer();
-        const v = line.addText(money(r.value, BASE, h));
-        v.font = Font.systemFont(12);
-        v.textColor = colorOf(r.day);
-      });
+    s.accList.slice(0, config.widgetFamily === "large" ? 6 : 4).forEach((a) => addLine(a.name, a.value, colorOf(a.day)));
+    if (config.widgetFamily === "large") {
+      w.addSpacer(8);
+      [...s.rows]
+        .sort((a, b) => b.value - a.value)
+        .slice(0, 6)
+        .forEach((r) => addLine(r.it.name, r.value, colorOf(r.day)));
+    }
   }
   w.addSpacer();
   const t = w.addText(db.updated ? new Date(db.updated).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) + " 기준" : "");
