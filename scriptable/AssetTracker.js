@@ -118,7 +118,7 @@ function marketOf(it) {
   if (it.type === "cash") return "현금";
   if (it.type === "manual") return "기타";
   if (it.type === "crypto") return "코인";
-  const domestic = (it.currency || BASE) === BASE && /\.(KS|KQ)$/i.test(it.symbol || "");
+  const domestic = (it.currency || BASE) === BASE || /\.(KS|KQ)$/i.test(it.symbol || "");
   return domestic ? "국내주식" : "해외주식";
 }
 
