@@ -94,7 +94,7 @@ function calc(db) {
     // costKRW(원화 환산 매입금액)가 있으면 그대로 사용 (환차손익 포함).
     // 없으면 매입 환율을 모르므로 현재 환율 기준으로 환산 (환차손익 미포함)
     const cost = it.costKRW != null ? it.costKRW : costLocal * fx.rate;
-    return { it, price, cur, value, cost, day: value - prevValue, pl: value - cost };
+    return { it, price, cur, value, cost, day: value - prevValue, pl: value - cost, localDayPct: prev ? (price / prev - 1) * 100 : 0 };
   });
   const sum = (k) => rows.reduce((a, r) => a + r[k], 0);
   const total = sum("value");
@@ -414,7 +414,10 @@ function render(table, db) {
       const plPct = r.cost ? (r.pl / r.cost) * 100 : 0;
       const noPrice = r.it.type === "cash" || r.it.type === "manual";
       // 일간 변동(오늘)은 일간 등락 색, 평가금액/손익은 손익 색으로 따로 표시
-      row.addCell(cell(noPrice ? " " : pct(dayPct), { sub: noPrice ? " " : "오늘", color: colorOf(r.day), subColor: COLORS.mute, right: true, weight: 3, size: 14 }));
+      // 외화 종목은 원화 기준(환율 포함) 아래에 현지통화 기준 등락률도 함께 표시
+      const foreign = r.cur !== BASE;
+      const subText = noPrice ? " " : foreign ? `${r.cur} ${pct(r.localDayPct)}` : "오늘";
+      row.addCell(cell(noPrice ? " " : pct(dayPct), { sub: subText, color: colorOf(r.day), subColor: foreign && !noPrice ? colorOf(r.localDayPct) : COLORS.mute, right: true, weight: 3, size: 14 }));
       row.addCell(cell(money(r.value, BASE, h), { sub: noPrice ? " " : `손익 ${pct(plPct)}`, subColor: colorOf(r.pl), right: true, weight: 5, size: 15 }));
       row.onSelect = async () => {
         if (await itemMenu(db, r)) {
