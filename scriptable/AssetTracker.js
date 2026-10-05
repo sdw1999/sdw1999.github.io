@@ -287,7 +287,9 @@ function render(table, db) {
     row.height = 64;
     row.dismissOnSelect = false;
     const share = s.total ? ((r.value / s.total) * 100).toFixed(1) : "0.0";
-    row.addCell(cell(r.it.name, { sub: `${TYPES.find((t) => t.key === r.it.type)?.label} · ${share}%`, subColor: COLORS.mute, weight: 5, bold: true }));
+    const stale = TYPES.find((t) => t.key === r.it.type)?.live && !db.cache[r.it.symbol] ? " · ⚠︎시세없음" : "";
+    const acct = r.it.account ? `${r.it.account} · ` : "";
+    row.addCell(cell(r.it.name, { sub: `${acct}${TYPES.find((t) => t.key === r.it.type)?.label} · ${share}%${stale}`, subColor: COLORS.mute, weight: 5, bold: true }));
     const dayPct = r.value - r.day ? (r.day / (r.value - r.day)) * 100 : 0;
     row.addCell(cell(money(r.value, BASE, h), { sub: r.it.type === "cash" || r.it.type === "manual" ? " " : `${pct(dayPct)} · 손익 ${pct(r.cost ? (r.pl / r.cost) * 100 : 0)}`, subColor: colorOf(r.pl), right: true, weight: 6, size: 15 }));
     row.onSelect = async () => {
