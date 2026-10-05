@@ -243,11 +243,12 @@ function render(table, db) {
   const head = new UITableRow();
   head.height = 96;
   head.isHeader = true;
-  head.addCell(cell("총 자산", { sub: money(s.total, BASE, h), size: 14, bold: true, weight: 1 }));
+  const headCell = cell("총 자산", { sub: money(s.total, BASE, h), size: 14, bold: true, weight: 1 });
+  headCell.titleColor = COLORS.mute;
+  headCell.subtitleColor = Color.dynamic(Color.black(), Color.white());
+  headCell.subtitleFont = Font.boldSystemFont(30);
+  head.addCell(headCell);
   table.addRow(head);
-  head.cells[0].titleColor = COLORS.mute;
-  head.cells[0].subtitleColor = Color.dynamic(Color.black(), Color.white());
-  head.cells[0].subtitleFont = Font.boldSystemFont(30);
 
   const sub = new UITableRow();
   sub.height = 56;
