@@ -134,6 +134,140 @@ const signed = (n, hide) => (hide ? "••••" : (n >= 0 ? "+" : "-") + mone
 const pct = (n) => (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
 const colorOf = (n) => (n > 0 ? COLORS.up : n < 0 ? COLORS.down : COLORS.mute);
 
+// ---------- 자산 분류 / 분석 ----------
+const CLS_COLOR = { 국내주식: "#2f6fdb", 해외주식: "#12a594", 채권: "#8f6bd8", 금: "#e0a31a", 현금성: "#8a9a94" };
+const CUR_REGION = { USD: "미국", JPY: "일본", EUR: "유럽", CNY: "중국", HKD: "중국" };
+
+// 이름/심볼로 자산군을 자동 분류. 항목에 assetClass 를 직접 넣으면 그 값을 우선 사용.
+// 반환: [{ cls, region, w }]  (혼합형은 비율로 쪼갬)
+function classify(it) {
+  const n = `${it.name || ""} ${it.symbol || ""}`;
+  if (it.assetClass) return [{ cls: it.assetClass, region: it.region || "-", w: 1 }];
+  if (it.type === "cash") return [{ cls: "현금성", region: "-", w: 1 }];
+  if (/골드|금현물|gold/i.test(n)) return [{ cls: "금", region: "-", w: 1 }];
+  if (/혼합/.test(n)) return [{ cls: "국내주식", region: "한국", w: 0.5 }, { cls: "채권", region: "-", w: 0.5 }];
+  if (/KOFR|MMF|CD금리|머니마켓|파킹/i.test(n)) return [{ cls: "현금성", region: "-", w: 1 }];
+  if (/국고채|국채|미국채|회사채|채권|TIPS/i.test(n)) return [{ cls: "채권", region: "-", w: 1 }];
+  const region = /인도|nifty/i.test(n) ? "인도" : /차이나|CSI|중국/i.test(n) ? "중국" : /신흥국|MSCI/i.test(n) ? "신흥국" : /S&P|나스닥|nasdaq|미국/i.test(n) ? "미국" : null;
+  if (region) return [{ cls: "해외주식", region, w: 1 }];
+  const cur = it.currency || BASE;
+  if (cur !== BASE) return [{ cls: "해외주식", region: CUR_REGION[cur] || "기타", w: 1 }];
+  return [{ cls: "국내주식", region: "한국", w: 1 }];
+}
+
+function analyze(db) {
+  const s = calc(db);
+  const acc = (m, k, r, p) => {
+    const a = (m[k] = m[k] || { name: k, value: 0, cost: 0, day: 0 });
+    a.value += r.value * p;
+    a.cost += r.cost * p;
+    a.day += r.day * p;
+  };
+  const cls = {}, region = {}, account = {}, tax = {}, hold = {};
+  let usdDirect = 0;
+  for (const r of s.rows) {
+    const k = r.it.account || "기타";
+    acc(account, k, r, 1);
+    acc(tax, /연금|IRP|DC|ISA/i.test(k) ? "절세계좌 (연금·IRP·DC·ISA)" : "일반계좌", r, 1);
+    if (r.it.type !== "cash") {
+      const hk = r.it.symbol || r.it.name;
+      acc(hold, hk, r, 1);
+      hold[hk].label = r.it.name;
+    }
+    if (r.cur !== BASE && !/\(H\)|헤지/.test(r.it.name || "")) usdDirect += r.value;
+    for (const p of classify(r.it)) {
+      acc(cls, p.cls, r, p.w);
+      if (p.cls === "국내주식" || p.cls === "해외주식") acc(region, `${p.cls === "국내주식" ? "국내" : "해외"} · ${p.region}`, r, p.w);
+    }
+  }
+  const T = s.total || 1;
+  const list = (m, order) => Object.values(m).sort((a, b) => (order ? order.indexOf(a.name) - order.indexOf(b.name) : b.value - a.value));
+  const classes = list(cls, ["국내주식", "해외주식", "채권", "금", "현금성"]).map((c) => Object.assign(c, { color: CLS_COLOR[c.name] || "#999" }));
+  const holdings = list(hold).map((h) => Object.assign(h, { name: h.label || h.name }));
+  const pc = (n) => (cls[n] ? cls[n].value / T : 0);
+  const plPct = (n) => (cls[n] && cls[n].cost ? (cls[n].value / cls[n].cost - 1) * 100 : 0);
+
+  // ----- 평가 (규칙 기반 코멘트) -----
+  const eq = pc("국내주식") + pc("해외주식"), bd = pc("채권"), gd = pc("금"), cs = pc("현금성");
+  const f = (x) => (x * 100).toFixed(1) + "%";
+  const ins = [];
+  ins.push({ t: "자산 배분", b: `주식 ${f(eq)} · 채권 ${f(bd)} · 금 ${f(gd)} · 현금성 ${f(cs)}. ` + (eq >= 0.6 ? "주식 비중이 높은 공격형 구성입니다. 시장 급락 때 평가액 변동이 큽니다." : eq <= 0.35 ? "방어적인 구성입니다." : "주식과 안전자산이 섞인 균형형에 가깝습니다.") });
+  const eqTotal = (cls["국내주식"]?.value || 0) + (cls["해외주식"]?.value || 0) || 1;
+  const regs = list(region).filter((x) => x.value > 0);
+  if (regs[0] && regs[0].value / eqTotal > 0.35) ins.push({ t: "지역 쏠림", b: `주식 중 ${regs[0].name} 비중이 ${(regs[0].value / eqTotal * 100).toFixed(0)}%로 가장 큽니다. 한 지역 시장의 영향이 커질 수 있습니다.` });
+  const ov = (cls["해외주식"]?.value || 0) / eqTotal;
+  ins.push({ t: "국내/해외", b: `주식의 ${(ov * 100).toFixed(0)}%가 해외, ${((1 - ov) * 100).toFixed(0)}%가 국내입니다.` });
+  const top = holdings.slice(0, 3);
+  const big = top.filter((h) => h.value / T > 0.1);
+  if (big.length) ins.push({ t: "종목 집중", b: `${big.map((h) => `${h.name} ${(h.value / T * 100).toFixed(1)}%`).join(", ")} — 한 종목이 전체의 10%를 넘습니다. (같은 종목은 모든 계좌를 합산했습니다)` });
+  else ins.push({ t: "종목 집중", b: `최대 종목 비중 ${(top[0] ? top[0].value / T * 100 : 0).toFixed(1)}%로 특정 종목 쏠림은 크지 않습니다.` });
+  if (cls["채권"] && plPct("채권") < -3) ins.push({ t: "채권", b: `채권 평가손익 ${plPct("채권").toFixed(1)}%. 금리 상승기에는 장기채(30년 등) 가격 변동이 큽니다. 만기·듀레이션이 긴 상품 비중을 점검해 보세요.` });
+  if (cls["금"] && plPct("금") > 30) ins.push({ t: "금", b: `금 수익률 ${plPct("금").toFixed(0)}%로 비중이 ${f(gd)}까지 올라왔습니다. 목표 비중을 넘었다면 리밸런싱을 고려해 볼 만합니다.` });
+  const best = classes.map((c) => ({ n: c.name, pl: c.value - c.cost })).sort((a, b) => b.pl - a.pl);
+  if (best.length > 1) ins.push({ t: "손익 기여", b: `평가이익은 ${best[0].n}(${signed(best[0].pl)})이 가장 크고, ${best[best.length - 1].pl < 0 ? `${best[best.length - 1].n}(${signed(best[best.length - 1].pl)})이 손실입니다.` : "손실 자산군은 없습니다."}` });
+  if (cs < 0.02) ins.push({ t: "현금성", b: `현금성 자산이 ${f(cs)}로 적습니다. 리밸런싱·긴급 자금용 현금은 별도로 확보돼 있는지 확인해 보세요.` });
+  if (usdDirect / T > 0.03) ins.push({ t: "환율", b: `달러 직접 보유(환헤지 없음) 자산이 ${f(usdDirect / T)}입니다. 원/달러 변동이 평가액에 그대로 반영됩니다.` });
+  ins.push({ t: "참고", b: "자산군은 종목명으로 자동 분류한 값이며(혼합형은 주식/채권 50:50), 투자 권유가 아닌 참고용 요약입니다." });
+
+  return { total: s.total, cost: s.cost, classes, regions: regs, accounts: list(account), tax: list(tax), holdings, insights: ins, usdDirect };
+}
+
+function esc(t) {
+  return String(t).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+const shortWon = (n) => (Math.abs(n) >= 1e8 ? (n / 1e8).toFixed(2) + "억" : Math.round(n / 1e4).toLocaleString("ko-KR") + "만");
+
+function reportHTML(db) {
+  const a = analyze(db);
+  const hide = db.hide;
+  const T = a.total || 1;
+  const pc = (v) => ((v / T) * 100).toFixed(1) + "%";
+  const R = 70, C = 2 * Math.PI * R;
+  let off = 0;
+  const arcs = a.classes.filter((c) => c.value > 0).map((c) => {
+    const len = (c.value / T) * C;
+    const e = `<circle r="${R}" cx="100" cy="100" fill="none" stroke="${c.color}" stroke-width="30" stroke-dasharray="${len.toFixed(2)} ${(C - len).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}" transform="rotate(-90 100 100)"/>`;
+    off += len;
+    return e;
+  }).join("");
+  const donut = `<svg viewBox="0 0 200 200" class="donut">${arcs}<text x="100" y="96" text-anchor="middle" class="dl">총 자산</text><text x="100" y="120" text-anchor="middle" class="dv">${hide ? "••••" : shortWon(a.total)}</text></svg>`;
+  const legend = a.classes.map((c) => {
+    const pl = c.cost ? (c.value / c.cost - 1) * 100 : 0;
+    return `<div class="lg"><i style="background:${c.color}"></i><b>${c.name}</b><span class="r">${pc(c.value)}</span><small>${hide ? "" : shortWon(c.value) + " · "}손익 ${pl >= 0 ? "+" : ""}${pl.toFixed(1)}%</small></div>`;
+  }).join("");
+  const bars = (items, max, color) => items.filter((x) => x.value > 0).map((x) => {
+    const w = Math.max(1, (x.value / max) * 100);
+    return `<div class="bar"><div class="bl"><span>${esc(x.name)}</span><span>${pc(x.value)}</span></div><div class="bt"><div class="bf" style="width:${w.toFixed(1)}%;background:${x.color || color}"></div></div></div>`;
+  }).join("");
+  const maxOf = (l) => Math.max(...l.map((x) => x.value), 1);
+  const ins = a.insights.map((i) => `<div class="ins"><b>${esc(i.t)}</b><p>${esc(i.b)}</p></div>`).join("");
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#f5f7f6;--card:#fff;--fg:#17211c;--mute:#6b7a73;--line:#e3e9e5;--bar:#2f6fdb}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1a15;--card:#18271f;--fg:#eaf2ed;--mute:#9bb0a5;--line:#243629}}
+*{box-sizing:border-box}body{margin:0;padding:16px;overflow-x:hidden;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,"Apple SD Gothic Neo",sans-serif}
+h1{font-size:22px;margin:4px 0 12px}h2{font-size:15px;margin:0 0 10px;color:var(--mute);font-weight:600}
+.card{background:var(--card);border-radius:14px;padding:16px;margin-bottom:12px}
+.donut{width:200px;height:200px;display:block;margin:0 auto 8px}.dl{fill:var(--mute);font-size:11px}.dv{fill:var(--fg);font-size:20px;font-weight:700}
+.lg{display:grid;grid-template-columns:14px 1fr auto;gap:2px 8px;align-items:center;padding:6px 0;border-top:1px solid var(--line)}
+.lg i{width:12px;height:12px;border-radius:3px}.lg .r{font-weight:700}.lg small{grid-column:2/4;color:var(--mute)}
+.bar{margin:8px 0}.bl{display:flex;justify-content:space-between;font-size:14px}.bt{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:3px}.bf{height:100%;border-radius:4px;background:var(--bar)}
+.ins{padding:8px 0;border-top:1px solid var(--line)}.ins:first-of-type{border-top:0}.ins b{font-size:14px}.ins p{margin:2px 0 0;color:var(--fg)}
+</style></head><body>
+<h1>포트폴리오 분석</h1>
+<div class="card"><h2>자산군별 비중</h2>${donut}${legend}</div>
+<div class="card"><h2>주식 지역별 (전체 대비)</h2>${bars(a.regions, maxOf(a.regions), "#12a594")}</div>
+<div class="card"><h2>계좌별</h2>${bars(a.accounts, maxOf(a.accounts), "#2f6fdb")}</div>
+<div class="card"><h2>절세계좌 / 일반계좌</h2>${bars(a.tax, maxOf(a.tax), "#8f6bd8")}</div>
+<div class="card"><h2>상위 보유 종목 (모든 계좌 합산)</h2>${bars(a.holdings.slice(0, 8), maxOf(a.holdings.slice(0, 8)), "#e0a31a")}</div>
+<div class="card"><h2>평가</h2>${ins}</div>
+</body></html>`;
+}
+
+async function showReport(db) {
+  await WebView.loadHTML(reportHTML(db), null, null, true);
+}
+
 // ---------- 입력 UI ----------
 async function editItem(db, item) {
   const isNew = !item;
@@ -374,7 +508,11 @@ function render(table, db) {
     render(table, db);
     table.reload();
   };
-  [add, ref, tools].forEach((c) => bar.addCell(c));
+  const rep = UITableCell.button("📊 분석");
+  rep.onTap = async () => {
+    await showReport(db);
+  };
+  [add, ref, rep, tools].forEach((c) => bar.addCell(c));
   table.addRow(bar);
 
   const sorted = [...s.rows];
