@@ -43,16 +43,38 @@ function saveDB(db) {
 }
 
 // ---------- 시세 ----------
+// Yahoo chart 응답 해석.
+// 주의: range=5d 에서 meta.chartPreviousClose 는 "5거래일 전 종가"라서 전일 종가가 아님.
+// 그래서 일봉 종가 배열에서 직접 전일 종가를 찾는다.
+function parseChart(json) {
+  const r = json.chart.result[0];
+  const m = r.meta;
+  const price = m.regularMarketPrice;
+  const off = m.gmtoffset || 0;
+  const dayOf = (t) => Math.floor((t + off) / 86400);
+  const ts = r.timestamp || [];
+  const cl = (r.indicators && r.indicators.quote && r.indicators.quote[0] && r.indicators.quote[0].close) || [];
+  const bars = [];
+  ts.forEach((t, i) => {
+    if (cl[i] != null) bars.push({ day: dayOf(t), close: cl[i] });
+  });
+  let prev = null;
+  if (bars.length) {
+    const lastDay = m.regularMarketTime ? dayOf(m.regularMarketTime) : bars[bars.length - 1].day;
+    // 마지막 봉이 오늘(최근 거래일) 봉이면 그 이전 봉이 전일 종가, 아니면 마지막 봉이 전일 종가
+    if (bars[bars.length - 1].day === lastDay) prev = bars.length > 1 ? bars[bars.length - 2].close : null;
+    else prev = bars[bars.length - 1].close;
+  }
+  if (prev == null) prev = m.previousClose ?? price;
+  return { price, prev, currency: m.currency, name: m.shortName || m.symbol };
+}
+
 async function yahoo(symbol) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
   const req = new Request(url);
   req.timeoutInterval = 10;
   req.headers = { "User-Agent": "Mozilla/5.0" };
-  const json = await req.loadJSON();
-  const m = json.chart.result[0].meta;
-  const price = m.regularMarketPrice;
-  const prev = m.chartPreviousClose ?? m.previousClose ?? price;
-  return { price, prev, currency: m.currency, name: m.shortName || m.symbol };
+  return parseChart(await req.loadJSON());
 }
 
 async function refresh(db) {
