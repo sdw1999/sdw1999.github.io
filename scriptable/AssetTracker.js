@@ -275,7 +275,32 @@ function analyze(db) {
   if (usdDirect / T > 0.03) ins.push({ t: "환율", b: `달러 직접 보유(환헤지 없음) 자산이 ${f(usdDirect / T)}입니다. 원/달러 변동이 평가액에 그대로 반영됩니다.` });
   ins.push({ t: "참고", b: "자산군은 종목명으로 자동 분류한 값이며(혼합형은 주식/채권 50:50), 투자 권유가 아닌 참고용 요약입니다." });
 
-  return { total: s.total, cost: s.cost, classes, regions: regs, accounts: list(account), tax: list(tax), holdings, insights: ins, usdDirect };
+  // ----- 종합 점수 (규칙 기반, 참고용) -----
+  const clamp = (x, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, x));
+  const ent = (arr) => {
+    const t = arr.reduce((a, b) => a + b, 0) || 1;
+    const ps = arr.map((x) => x / t).filter((p) => p > 0);
+    return ps.length > 1 ? -ps.reduce((a, p) => a + p * Math.log(p), 0) / Math.log(5) : 0;
+  };
+  const clsEnt = ent(classes.map((c) => c.value));
+  const regEnt = ent(regs.map((r) => r.value));
+  const t1 = holdings[0] ? holdings[0].value / T : 0;
+  const t3 = holdings.slice(0, 3).reduce((x, h) => x + h.value, 0) / T;
+  const safe = bd + gd + cs;
+  const topReg = regs[0] ? regs[0].value / eqTotal : 0;
+  const lossShare = holdings.filter((h) => h.cost && h.value / h.cost - 1 < -0.1).reduce((x, h) => x + h.value, 0) / T;
+  const pctS = (x) => (x * 100).toFixed(1) + "%";
+  const scores = [
+    { name: "분산", score: Math.round(100 * clamp((0.5 * clsEnt + 0.5 * regEnt) / 0.8)), note: `자산군 ${classes.filter((c) => c.value > 0).length}종 · 주식 지역 ${regs.length}곳에 나뉨` },
+    { name: "집중도", score: Math.round(100 - clamp((t1 - 0.05) / 0.15) * 50 - clamp((t3 - 0.2) / 0.3) * 50), note: `최대 종목 ${pctS(t1)} · 상위 3종목 ${pctS(t3)}` },
+    { name: "방어력", score: Math.round(100 * (safe >= 0.3 && safe <= 0.6 ? 1 : safe < 0.3 ? clamp((safe - 0.05) / 0.25) : clamp((0.95 - safe) / 0.35))), note: `채권·금·현금성 ${pctS(safe)} (30~60%를 균형 구간으로 봄)` },
+    { name: "환·지역 쏠림", score: Math.round(100 - clamp((usdDirect / T - 0.1) / 0.25) * 40 - clamp((topReg - 0.4) / 0.3) * 40), note: `달러 직접 보유 ${pctS(usdDirect / T)} · 주식 중 최대 지역 ${pctS(topReg)}` },
+    { name: "손실 방어", score: Math.round(100 - clamp(lossShare / 0.3) * 100), note: `-10% 이상 손실 중인 종목이 전체의 ${pctS(lossShare)}` },
+  ];
+  const overall = Math.round(scores.reduce((x, y) => x + y.score, 0) / scores.length);
+  const grade = overall >= 85 ? "A" : overall >= 70 ? "B" : overall >= 55 ? "C" : "D";
+
+  return { total: s.total, cost: s.cost, classes, regions: regs, accounts: list(account), tax: list(tax), holdings, insights: ins, usdDirect, scores, overall, grade, eq, bd, gd, cs, t1, t3, topReg };
 }
 
 function esc(t) {
@@ -318,10 +343,12 @@ h1{font-size:22px;margin:4px 0 12px}h2{font-size:15px;margin:0 0 10px;color:var(
 .lg{display:grid;grid-template-columns:14px 1fr auto;gap:2px 8px;align-items:center;padding:6px 0;border-top:1px solid var(--line)}
 .lg i{width:12px;height:12px;border-radius:3px}.lg .r{font-weight:700}.lg small{grid-column:2/4;color:var(--mute)}
 .bar{margin:8px 0}.bl{display:flex;justify-content:space-between;font-size:14px}.bt{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:3px}.bf{height:100%;border-radius:4px;background:var(--bar)}
+.score{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px}.big{font-size:40px;font-weight:800}.big span{font-size:16px;color:var(--mute);font-weight:400}.grade{font-size:34px;font-weight:800;color:#12a594}
 .mute{color:var(--mute);font-size:13px;margin:6px 0}.trend{width:100%;height:auto;display:block}.ax{fill:var(--mute);font-size:9px}h2 small{font-weight:400;font-size:11px}.tr{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr;gap:4px;padding:6px 0;border-top:1px solid var(--line);font-size:13px;text-align:right}.tr span:first-child{text-align:left}.th{color:var(--mute);font-size:12px}.up{color:#d32f2f}.dn{color:#1976d2}@media(prefers-color-scheme:dark){.up{color:#ff6b6b}.dn{color:#64b5f6}}
 .ins{padding:8px 0;border-top:1px solid var(--line)}.ins:first-of-type{border-top:0}.ins b{font-size:14px}.ins p{margin:2px 0 0;color:var(--fg)}
 </style></head><body>
 <h1>포트폴리오 분석</h1>
+<div class="card"><h2>종합 점수 <small>(규칙 기반 · 참고용)</small></h2><div class="score"><div class="big">${a.overall}<span>/100</span></div><div class="grade">${a.grade}</div></div>${a.scores.map((x) => `<div class="bar"><div class="bl"><span>${esc(x.name)}</span><span>${x.score}</span></div><div class="bt"><div class="bf" style="width:${Math.max(2, x.score)}%;background:${x.score >= 70 ? "#12a594" : x.score >= 50 ? "#e0a31a" : "#d9534f"}"></div></div><div class="mute">${esc(x.note)}</div></div>`).join("")}</div>
 <div class="card"><h2>자산군별 비중</h2>${donut}${legend}</div>
 ${trendCard(db)}
 <div class="card"><h2>주식 지역별 (전체 대비)</h2>${bars(a.regions, maxOf(a.regions), "#12a594")}</div>
@@ -365,6 +392,65 @@ function trendCard(db) {
 
 async function showReport(db) {
   await WebView.loadHTML(reportHTML(db), null, null, true);
+}
+
+// ---------- Claude 평가 요청용 요약 ----------
+function portfolioPrompt(db, withAmounts) {
+  const a = analyze(db);
+  const T = a.total || 1;
+  const p = (v) => ((v / T) * 100).toFixed(1) + "%";
+  const sg = (v) => (v >= 0 ? "+" : "") + v.toFixed(1) + "%";
+  const money1 = (v) => (withAmounts ? ` (${shortWon(v)})` : "");
+  const L = [];
+  L.push("아래는 내 투자 포트폴리오 요약입니다. 전문가 관점에서 평가해 주세요." + (withAmounts ? "" : " (금액은 비율로만 표기했습니다.)"));
+  L.push("투자 목적/기간/위험 감수 수준: [여기에 직접 적어 주세요. 예: 은퇴 대비 장기, 중간 정도의 위험]");
+  L.push("");
+  L.push(`■ 자산군 비중${withAmounts ? ` (총 ${shortWon(a.total)})` : ""}`);
+  a.classes.forEach((c) => L.push(`- ${c.name} ${p(c.value)}${money1(c.value)}, 평가손익 ${sg(c.cost ? (c.value / c.cost - 1) * 100 : 0)}`));
+  L.push("");
+  L.push("■ 주식 지역 비중 (전체 대비)");
+  a.regions.forEach((r) => L.push(`- ${r.name} ${p(r.value)}`));
+  L.push(`- 달러 직접 보유(환헤지 없음) ${p(a.usdDirect)}`);
+  L.push("");
+  L.push("■ 계좌별 비중");
+  a.accounts.forEach((c) => L.push(`- ${c.name} ${p(c.value)}`));
+  a.tax.forEach((c) => L.push(`- ${c.name} ${p(c.value)}`));
+  L.push("");
+  L.push("■ 상위 보유 종목 (모든 계좌 합산)");
+  a.holdings.slice(0, 12).forEach((h) => L.push(`- ${h.name} ${p(h.value)}, 평가손익 ${sg(h.cost ? (h.value / h.cost - 1) * 100 : 0)}`));
+  const hist = (db.history || []).slice(-6);
+  if (hist.length >= 2) {
+    L.push("");
+    L.push("■ 최근 월별 추이 (첫 달=100 기준 지수; 신규 납입 포함)");
+    L.push(hist.map((x) => `${x.m}: ${((x.total / hist[0].total) * 100).toFixed(0)}`).join(", "));
+  }
+  L.push("");
+  L.push(`■ 앱 자동 점수 (규칙 기반): ${a.overall}/100 (${a.grade}) — ` + a.scores.map((x) => `${x.name} ${x.score}`).join(", "));
+  L.push("");
+  L.push("요청 사항:");
+  L.push("1. 현재 구성의 강점과 위험 요인을 구체적으로 짚어 주세요.");
+  L.push("2. 쏠림이나 중복 보유(같은 종목/유사 자산을 여러 계좌에 보유)가 있는지 확인해 주세요.");
+  L.push("3. 리밸런싱이 필요하다면 어떤 기준으로, 어느 계좌에서 하는 것이 효율적일지(연금·IRP·ISA 등 세제계좌 활용 포함) 의견을 주세요.");
+  L.push("4. 위 정보만으로 판단하기 어려운 부분과 추가로 확인해야 할 정보를 알려 주세요.");
+  return L.join("\n");
+}
+
+async function askClaude(db) {
+  const a = new Alert();
+  a.title = "Claude에게 평가 요청";
+  a.message = "포트폴리오 요약을 복사해서 Claude 앱에 붙여넣어 평가를 받습니다. 요약에는 종목명과 비중이 들어가며, 계좌번호나 이름은 포함되지 않습니다.";
+  a.addAction("비율만 복사 (권장)");
+  a.addAction("금액 포함해서 복사");
+  a.addCancelAction("취소");
+  const r = await a.presentAlert();
+  if (r < 0) return;
+  Pasteboard.copy(portfolioPrompt(db, r === 1));
+  const d = new Alert();
+  d.title = "복사 완료";
+  d.message = "Claude 앱을 열어 새 대화에 붙여넣으세요. 첫 줄 아래의 투자 목적/기간은 직접 적어 주세요.";
+  d.addAction("claude.ai 열기");
+  d.addCancelAction("닫기");
+  if ((await d.presentAlert()) === 0) Safari.open("https://claude.ai/new");
 }
 
 // ---------- 입력 UI ----------
@@ -507,6 +593,7 @@ async function toolsMenu(db) {
   a.addAction("JSON 가져오기 (클립보드에서)");
   a.addAction("시세 점검 (시세 없는 종목 고치기)");
   a.addAction("월별 기록 추가/수정");
+  a.addAction("Claude에게 평가 요청 (요약 복사)");
   a.addCancelAction("닫기");
   const r = await a.presentSheet();
   if (r === 0) {
@@ -522,6 +609,8 @@ async function toolsMenu(db) {
     await checkQuotes(db);
   } else if (r === 4) {
     await editHistory(db);
+  } else if (r === 5) {
+    await askClaude(db);
   } else if (r === 2) {
     try {
       const data = JSON.parse(Pasteboard.paste());
