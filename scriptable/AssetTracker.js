@@ -202,6 +202,66 @@ async function editHistory(db) {
   saveDB(db);
 }
 
+// ---------- 나이·투자성향 ----------
+// 주식 목표 비중 = (기준값 − 나이)% — 흔히 쓰는 경험칙(100/110/120 − 나이). 20~90%로 제한.
+const STYLE_BASE = { 공격형: 120, 중립형: 110, 안정형: 100 };
+function profileTarget(db) {
+  const p = db.profile;
+  if (!p || !p.birthYear) return null;
+  const age = new Date().getFullYear() - p.birthYear;
+  const style = STYLE_BASE[p.style] ? p.style : "중립형";
+  const eqTarget = Math.max(20, Math.min(90, STYLE_BASE[style] - age)) / 100;
+  const yearsLeft = p.retireAge ? p.retireAge - age : null;
+  return { age, style, eqTarget, yearsLeft, retireAge: p.retireAge || null, label: `${age}세 ${style}` };
+}
+
+async function editProfile(db) {
+  const p = db.profile || {};
+  const al = new Alert();
+  al.title = "나이·투자성향 설정";
+  al.message = "점수의 방어력 기준(안전자산 목표 비중)과 자산 배분 평가를 나이에 맞춥니다. 설정하지 않으면 기본 기준(안전자산 30~60%)을 씁니다.";
+  al.addTextField("출생연도 (예: 1981)", p.birthYear ? String(p.birthYear) : "");
+  al.addTextField("은퇴 목표 나이 (선택, 예: 60)", p.retireAge ? String(p.retireAge) : "");
+  al.addAction("다음");
+  if (db.profile) al.addDestructiveAction("설정 지우기");
+  al.addCancelAction("취소");
+  const r = await al.presentAlert();
+  if (r < 0) return;
+  if (r === 1) {
+    delete db.profile;
+    saveDB(db);
+    return;
+  }
+  const now = new Date().getFullYear();
+  const by = parseInt(al.textFieldValue(0), 10);
+  const ra = parseInt(al.textFieldValue(1), 10);
+  if (!(by >= 1920 && by <= now - 15)) {
+    const e = new Alert();
+    e.title = "입력 확인";
+    e.message = "출생연도를 4자리 숫자로 입력해 주세요. (예: 1981)";
+    e.addAction("확인");
+    await e.presentAlert();
+    return;
+  }
+  const age = now - by;
+  const st = new Alert();
+  st.title = "투자 성향";
+  st.message = `주식 목표 비중 = 기준값 − 나이 (${age}세 기준)`;
+  const keys = ["공격형", "중립형", "안정형"];
+  keys.forEach((k) => st.addAction(`${k} (${STYLE_BASE[k]} − 나이 → 주식 ${Math.max(20, Math.min(90, STYLE_BASE[k] - age))}%)`));
+  st.addCancelAction("취소");
+  const k = await st.presentSheet();
+  if (k < 0) return;
+  db.profile = { birthYear: by, retireAge: ra > 0 ? ra : null, style: keys[k] };
+  saveDB(db);
+  const t = profileTarget(db);
+  const d = new Alert();
+  d.title = "저장했습니다";
+  d.message = `${t.label}: 주식 ${Math.round(t.eqTarget * 100)}% / 안전자산 ${Math.round((1 - t.eqTarget) * 100)}% 목표로 평가합니다.` + (t.yearsLeft != null ? ` 은퇴까지 약 ${t.yearsLeft}년.` : "") + " 나이는 매년 자동으로 반영됩니다.";
+  d.addAction("확인");
+  await d.presentAlert();
+}
+
 // ---------- 자산 분류 / 분석 ----------
 const CLS_COLOR = { 국내주식: "#2f6fdb", 해외주식: "#12a594", 채권: "#8f6bd8", 금: "#e0a31a", 현금성: "#8a9a94" };
 const CUR_REGION = { USD: "미국", JPY: "일본", EUR: "유럽", CNY: "중국", HKD: "중국" };
@@ -257,9 +317,16 @@ function analyze(db) {
 
   // ----- 평가 (규칙 기반 코멘트) -----
   const eq = pc("국내주식") + pc("해외주식"), bd = pc("채권"), gd = pc("금"), cs = pc("현금성");
+  const prof = profileTarget(db);
   const f = (x) => (x * 100).toFixed(1) + "%";
   const ins = [];
-  ins.push({ t: "자산 배분", b: `주식 ${f(eq)} · 채권 ${f(bd)} · 금 ${f(gd)} · 현금성 ${f(cs)}. ` + (eq >= 0.6 ? "주식 비중이 높은 공격형 구성입니다. 시장 급락 때 평가액 변동이 큽니다." : eq <= 0.35 ? "방어적인 구성입니다." : "주식과 안전자산이 섞인 균형형에 가깝습니다.") });
+  if (prof) {
+    const gap = (eq - prof.eqTarget) * 100;
+    ins.push({ t: "자산 배분", b: `주식 ${f(eq)} · 채권 ${f(bd)} · 금 ${f(gd)} · 현금성 ${f(cs)}. ${prof.label} 기준 목표는 주식 ${f(prof.eqTarget)} / 안전자산 ${f(1 - prof.eqTarget)}입니다. ` + (Math.abs(gap) <= 10 ? "목표 범위(±10%p) 안입니다." : gap > 0 ? `목표보다 주식이 ${gap.toFixed(0)}%p 많습니다. 하락장에서 변동폭이 목표보다 클 수 있습니다.` : `목표보다 주식이 ${(-gap).toFixed(0)}%p 적습니다. 장기 성장 여력이 목표보다 낮을 수 있습니다.`) });
+    if (prof.yearsLeft != null && prof.yearsLeft <= 5) ins.push({ t: "은퇴 시점", b: prof.yearsLeft > 0 ? `은퇴 목표까지 약 ${prof.yearsLeft}년 남았습니다. 인출 시점이 가까울수록 큰 하락을 회복할 시간이 짧아, 변동성 관리 비중이 커집니다.` : "은퇴 목표 나이에 도달했습니다. 인출 계획에 맞춰 현금성·안전자산 비중을 점검해 보세요." });
+  } else {
+    ins.push({ t: "자산 배분", b: `주식 ${f(eq)} · 채권 ${f(bd)} · 금 ${f(gd)} · 현금성 ${f(cs)}. ` + (eq >= 0.6 ? "주식 비중이 높은 공격형 구성입니다. 시장 급락 때 평가액 변동이 큽니다." : eq <= 0.35 ? "방어적인 구성입니다." : "주식과 안전자산이 섞인 균형형에 가깝습니다.") + " (⋯ 도구 → 나이·투자성향 설정을 하면 나이에 맞춰 평가합니다)" });
+  }
   const eqTotal = (cls["국내주식"]?.value || 0) + (cls["해외주식"]?.value || 0) || 1;
   const regs = list(region).filter((x) => x.value > 0);
   if (regs[0] && regs[0].value / eqTotal > 0.35) ins.push({ t: "지역 쏠림", b: `주식 중 ${regs[0].name} 비중이 ${(regs[0].value / eqTotal * 100).toFixed(0)}%로 가장 큽니다. 한 지역 시장의 영향이 커질 수 있습니다.` });
@@ -289,20 +356,23 @@ function analyze(db) {
   const t1 = holdings[0] ? holdings[0].value / T : 0;
   const t3 = holdings.slice(0, 3).reduce((x, h) => x + h.value, 0) / T;
   const safe = bd + gd + cs;
+  // 안전자산 목표 구간: 나이 설정 시 (1 - 주식 목표) ±10%p, 미설정 시 30~60%
+  const bLo = prof ? Math.max(0, 1 - prof.eqTarget - 0.1) : 0.3;
+  const bHi = prof ? Math.min(1, 1 - prof.eqTarget + 0.1) : 0.6;
   const topReg = regs[0] ? regs[0].value / eqTotal : 0;
   const lossShare = holdings.filter((h) => h.cost && h.value / h.cost - 1 < -0.1).reduce((x, h) => x + h.value, 0) / T;
   const pctS = (x) => (x * 100).toFixed(1) + "%";
   const scores = [
     { name: "분산", score: Math.round(100 * clamp((0.5 * clsEnt + 0.5 * regEnt) / 0.8)), note: `자산군 ${classes.filter((c) => c.value > 0).length}종 · 주식 지역 ${regs.length}곳에 나뉨` },
     { name: "집중도", score: Math.round(100 - clamp((t1 - 0.05) / 0.15) * 50 - clamp((t3 - 0.2) / 0.3) * 50), note: `최대 종목 ${pctS(t1)} · 상위 3종목 ${pctS(t3)}` },
-    { name: "방어력", score: Math.round(100 * (safe >= 0.3 && safe <= 0.6 ? 1 : safe < 0.3 ? clamp((safe - 0.05) / 0.25) : clamp((0.95 - safe) / 0.35))), note: `채권·금·현금성 ${pctS(safe)} (30~60%를 균형 구간으로 봄)` },
+    { name: "방어력", score: Math.round(100 * (safe >= bLo && safe <= bHi ? 1 : safe < bLo ? clamp(1 - (bLo - safe) / 0.25) : clamp(1 - (safe - bHi) / 0.35))), note: `채권·금·현금성 ${pctS(safe)} (목표 ${Math.round(bLo * 100)}~${Math.round(bHi * 100)}%${prof ? ` · ${prof.label}` : " · 기본 기준"})` },
     { name: "환·지역 쏠림", score: Math.round(100 - clamp((usdDirect / T - 0.1) / 0.25) * 40 - clamp((topReg - 0.4) / 0.3) * 40), note: `달러 직접 보유 ${pctS(usdDirect / T)} · 주식 중 최대 지역 ${pctS(topReg)}` },
     { name: "손실 방어", score: Math.round(100 - clamp(lossShare / 0.3) * 100), note: `-10% 이상 손실 중인 종목이 전체의 ${pctS(lossShare)}` },
   ];
   const overall = Math.round(scores.reduce((x, y) => x + y.score, 0) / scores.length);
   const grade = overall >= 85 ? "A" : overall >= 70 ? "B" : overall >= 55 ? "C" : "D";
 
-  return { total: s.total, cost: s.cost, classes, regions: regs, accounts: list(account), tax: list(tax), holdings, insights: ins, usdDirect, scores, overall, grade, eq, bd, gd, cs, t1, t3, topReg };
+  return { total: s.total, cost: s.cost, classes, regions: regs, accounts: list(account), tax: list(tax), holdings, insights: ins, usdDirect, scores, overall, grade, eq, bd, gd, cs, t1, t3, topReg, prof, bLo, bHi };
 }
 
 function esc(t) {
@@ -350,7 +420,7 @@ h1{font-size:22px;margin:4px 0 12px}h2{font-size:15px;margin:0 0 10px;color:var(
 .ins{padding:8px 0;border-top:1px solid var(--line)}.ins:first-of-type{border-top:0}.ins b{font-size:14px}.ins p{margin:2px 0 0;color:var(--fg)}
 </style></head><body>
 <h1>포트폴리오 분석</h1>
-<div class="card"><h2>종합 점수 <small>(규칙 기반 · 참고용)</small></h2><div class="score"><div class="big">${a.overall}<span>/100</span></div><div class="grade">${a.grade}</div></div>${a.scores.map((x) => `<div class="bar"><div class="bl"><span>${esc(x.name)}</span><span>${x.score}</span></div><div class="bt"><div class="bf" style="width:${Math.max(2, x.score)}%;background:${x.score >= 70 ? "#12a594" : x.score >= 50 ? "#e0a31a" : "#d9534f"}"></div></div><div class="mute">${esc(x.note)}</div></div>`).join("")}</div>
+<div class="card"><h2>종합 점수 <small>(규칙 기반 · 참고용)</small></h2><div class="score"><div class="big">${a.overall}<span>/100</span></div><div class="grade">${a.grade}</div></div><p class="mute">${a.prof ? `기준: ${a.prof.label} → 주식 ${Math.round(a.prof.eqTarget * 100)}% / 안전자산 ${Math.round((1 - a.prof.eqTarget) * 100)}% 목표${a.prof.yearsLeft != null ? ` · 은퇴까지 ${a.prof.yearsLeft}년` : ""}` : "기준: 기본값 (⋯ 도구 → 나이·투자성향 설정으로 맞춤 기준 사용)"}</p>${a.scores.map((x) => `<div class="bar"><div class="bl"><span>${esc(x.name)}</span><span>${x.score}</span></div><div class="bt"><div class="bf" style="width:${Math.max(2, x.score)}%;background:${x.score >= 70 ? "#12a594" : x.score >= 50 ? "#e0a31a" : "#d9534f"}"></div></div><div class="mute">${esc(x.note)}</div></div>`).join("")}</div>
 <div class="card"><h2>자산군별 비중</h2>${donut}${legend}</div>
 ${trendCard(db)}
 <div class="card"><h2>주식 지역별 (전체 대비)</h2>${bars(a.regions, maxOf(a.regions), "#12a594")}</div>
@@ -417,6 +487,7 @@ function portfolioPrompt(db, withAmounts) {
   const money1 = (v) => (withAmounts ? ` (${shortWon(v)})` : "");
   const L = [];
   L.push("아래는 내 투자 포트폴리오 요약입니다. 전문가 관점에서 평가해 주세요." + (withAmounts ? "" : " (금액은 비율로만 표기했습니다.)"));
+  if (a.prof) L.push(`투자자 정보: ${a.prof.age}세, 투자 성향 ${a.prof.style}${a.prof.retireAge ? `, 은퇴 목표 ${a.prof.retireAge}세(약 ${a.prof.yearsLeft}년 남음)` : ""}`);
   L.push("투자 목적/기간/위험 감수 수준: [여기에 직접 적어 주세요. 예: 은퇴 대비 장기, 중간 정도의 위험]");
   L.push("");
   L.push(`■ 자산군 비중${withAmounts ? ` (총 ${shortWon(a.total)})` : ""}`);
@@ -608,6 +679,7 @@ async function toolsMenu(db) {
   a.addAction("시세 점검 (시세 없는 종목 고치기)");
   a.addAction("월별 기록 추가/수정");
   a.addAction("Claude에게 평가 요청 (요약 복사)");
+  a.addAction("나이·투자성향 설정");
   a.addCancelAction("닫기");
   const r = await a.presentSheet();
   if (r === 0) {
@@ -625,6 +697,8 @@ async function toolsMenu(db) {
     await editHistory(db);
   } else if (r === 5) {
     await askClaude(db);
+  } else if (r === 6) {
+    await editProfile(db);
   } else if (r === 2) {
     try {
       const data = JSON.parse(Pasteboard.paste());
