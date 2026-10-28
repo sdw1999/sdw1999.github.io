@@ -168,7 +168,9 @@ function recordSnapshot(db) {
   const cls = {}, acct = {};
   a.classes.forEach((c) => (cls[c.name] = Math.round(c.value)));
   a.accounts.forEach((c) => (acct[c.name] = Math.round(c.value)));
-  const snap = { m: monthKey(), d: new Date().toISOString(), total: Math.round(a.total), cost: Math.round(a.cost), cls, acct };
+  const sc = {};
+  a.scores.forEach((x) => (sc[x.name] = x.score));
+  const snap = { m: monthKey(), d: new Date().toISOString(), total: Math.round(a.total), cost: Math.round(a.cost), cls, acct, score: a.overall, grade: a.grade, scores: sc };
   db.history = (db.history || []).filter((h) => h.m !== snap.m).concat(snap).sort((x, y) => (x.m < y.m ? -1 : 1));
 }
 
@@ -344,7 +346,7 @@ h1{font-size:22px;margin:4px 0 12px}h2{font-size:15px;margin:0 0 10px;color:var(
 .lg i{width:12px;height:12px;border-radius:3px}.lg .r{font-weight:700}.lg small{grid-column:2/4;color:var(--mute)}
 .bar{margin:8px 0}.bl{display:flex;justify-content:space-between;font-size:14px}.bt{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:3px}.bf{height:100%;border-radius:4px;background:var(--bar)}
 .score{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px}.big{font-size:40px;font-weight:800}.big span{font-size:16px;color:var(--mute);font-weight:400}.grade{font-size:34px;font-weight:800;color:#12a594}
-.mute{color:var(--mute);font-size:13px;margin:6px 0}.trend{width:100%;height:auto;display:block}.ax{fill:var(--mute);font-size:9px}h2 small{font-weight:400;font-size:11px}.tr{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr;gap:4px;padding:6px 0;border-top:1px solid var(--line);font-size:13px;text-align:right}.tr span:first-child{text-align:left}.th{color:var(--mute);font-size:12px}.up{color:#d32f2f}.dn{color:#1976d2}@media(prefers-color-scheme:dark){.up{color:#ff6b6b}.dn{color:#64b5f6}}
+.mute{color:var(--mute);font-size:13px;margin:6px 0}.trend{width:100%;height:auto;display:block}.ax{fill:var(--mute);font-size:9px}h2 small{font-weight:400;font-size:11px}.tr{display:grid;grid-template-columns:1.15fr 1fr 1fr 1fr .8fr;gap:4px;padding:6px 0;border-top:1px solid var(--line);font-size:13px;text-align:right}.tr span:first-child{text-align:left}.th{color:var(--mute);font-size:12px}.up{color:#d32f2f}.dn{color:#1976d2}@media(prefers-color-scheme:dark){.up{color:#ff6b6b}.dn{color:#64b5f6}}
 .ins{padding:8px 0;border-top:1px solid var(--line)}.ins:first-of-type{border-top:0}.ins b{font-size:14px}.ins p{margin:2px 0 0;color:var(--fg)}
 </style></head><body>
 <h1>포트폴리오 분석</h1>
@@ -383,11 +385,23 @@ function trendCard(db) {
     const chgPct = prev && prev.total ? (chg / prev.total) * 100 : null;
     const pl = x.cost ? x.total - x.cost : 0;
     const cls = chg == null ? "" : chg > 0 ? "up" : chg < 0 ? "dn" : "";
-    return `<div class="tr"><span>${x.m}${x.manual ? " ✎" : ""}</span><span>${hide ? "••••" : shortWon(x.total)}</span><span class="${cls}">${chgPct == null ? "-" : (chgPct >= 0 ? "+" : "") + chgPct.toFixed(1) + "%"}</span><span class="${pl > 0 ? "up" : pl < 0 ? "dn" : ""}">${x.cost ? (pl >= 0 ? "+" : "") + ((pl / x.cost) * 100).toFixed(1) + "%" : "-"}</span></div>`;
+    return `<div class="tr"><span>${x.m}${x.manual ? " ✎" : ""}</span><span>${hide ? "••••" : shortWon(x.total)}</span><span class="${cls}">${chgPct == null ? "-" : (chgPct >= 0 ? "+" : "") + chgPct.toFixed(1) + "%"}</span><span class="${pl > 0 ? "up" : pl < 0 ? "dn" : ""}">${x.cost ? (pl >= 0 ? "+" : "") + ((pl / x.cost) * 100).toFixed(1) + "%" : "-"}</span><span>${x.score != null ? x.score + " " + x.grade : "-"}</span></div>`;
   }).join("");
+  const scored = h.filter((x) => x.score != null);
+  let scoreLine = "";
+  if (scored.length) {
+    const f0 = scored[0], f1 = scored[scored.length - 1];
+    const diff = f1.score - f0.score;
+    scoreLine = `<p class="mute">점수: ${scored.length > 1 ? `${f0.m} ${f0.score}(${f0.grade}) → ${f1.m} ${f1.score}(${f1.grade}) (${diff >= 0 ? "+" : ""}${diff}점)` : `${f1.m} ${f1.score}(${f1.grade}) — 다음 달부터 변화가 표시됩니다`}. 직접 입력한 달(✎)은 점수가 없습니다.</p>`;
+    if (scored.length > 1) {
+      const worst = Object.keys(f1.scores || {}).map((k) => ({ k, d: (f1.scores[k] ?? 0) - ((f0.scores || {})[k] ?? f1.scores[k]) })).sort((x, y) => x.d - y.d);
+      const moved = worst.filter((x) => x.d !== 0);
+      if (moved.length) scoreLine += `<p class="mute">항목별 변화: ${moved.map((x) => `${x.k} ${x.d > 0 ? "+" : ""}${x.d}`).join(", ")}</p>`;
+    }
+  }
   const first = h[0], last = h[h.length - 1];
   const tot = first.total ? ((last.total / first.total - 1) * 100).toFixed(1) : "0";
-  return `<div class="card"><h2>월별 자산 추이 <small>(실선 평가액 · 점선 투자원금)</small></h2>${svg}<p class="mute">${first.m} → ${last.m}: ${hide ? "" : shortWon(first.total) + " → " + shortWon(last.total) + " "}(${Number(tot) >= 0 ? "+" : ""}${tot}%)</p><div class="tr th"><span>월</span><span>평가액</span><span>전월 대비</span><span>수익률</span></div>${rows}</div>`;
+  return `<div class="card"><h2>월별 자산 추이 <small>(실선 평가액 · 점선 투자원금)</small></h2>${svg}<p class="mute">${first.m} → ${last.m}: ${hide ? "" : shortWon(first.total) + " → " + shortWon(last.total) + " "}(${Number(tot) >= 0 ? "+" : ""}${tot}%)</p><div class="tr th"><span>월</span><span>평가액</span><span>전월 대비</span><span>수익률</span><span>점수</span></div>${rows}${scoreLine}</div>`;
 }
 
 async function showReport(db) {
@@ -422,7 +436,7 @@ function portfolioPrompt(db, withAmounts) {
   if (hist.length >= 2) {
     L.push("");
     L.push("■ 최근 월별 추이 (첫 달=100 기준 지수; 신규 납입 포함)");
-    L.push(hist.map((x) => `${x.m}: ${((x.total / hist[0].total) * 100).toFixed(0)}`).join(", "));
+    L.push(hist.map((x) => `${x.m}: ${((x.total / hist[0].total) * 100).toFixed(0)}${x.score != null ? ` (점수 ${x.score})` : ""}`).join(", "));
   }
   L.push("");
   L.push(`■ 앱 자동 점수 (규칙 기반): ${a.overall}/100 (${a.grade}) — ` + a.scores.map((x) => `${x.name} ${x.score}`).join(", "));
