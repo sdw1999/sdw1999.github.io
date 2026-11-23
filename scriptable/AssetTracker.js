@@ -539,6 +539,77 @@ async function askClaude(db) {
 }
 
 // ---------- 입력 UI ----------
+// 기존 계좌 목록에서 고르거나 새 계좌 이름 입력. 취소 시 null.
+async function pickAccount(db, current) {
+  const names = [...new Set(db.items.map((i) => i.account).filter(Boolean))];
+  const a = new Alert();
+  a.title = "계좌 선택";
+  if (current) a.message = `현재: ${current}`;
+  names.forEach((n) => a.addAction(n));
+  a.addAction("＋ 새 계좌 이름 입력");
+  a.addCancelAction("취소");
+  const k = await a.presentSheet();
+  if (k < 0) return null;
+  if (k < names.length) return names[k];
+  const inp = new Alert();
+  inp.title = "새 계좌 이름";
+  inp.addTextField("예: 연금(비공제), ISA, 종합", "");
+  inp.addAction("확인");
+  inp.addCancelAction("취소");
+  if ((await inp.presentAlert()) < 0) return null;
+  return inp.textFieldValue(0).trim() || null;
+}
+
+// 보유 종목에 추가 매수(평균 매입가 재계산) 또는 일부/전부 매도 반영
+async function trade(db, it, buy) {
+  const cur = it.currency || BASE;
+  const num = (t) => parseFloat(String(t).replace(/,/g, ""));
+  const al = new Alert();
+  al.title = `${it.name} · ${buy ? "추가 매수" : "매도"}`;
+  al.message = `현재 ${Number(it.qty).toLocaleString()}주 · 평균 매입가 ${it.avgCost != null ? Number(it.avgCost).toLocaleString() : "-"} ${cur}`;
+  al.addTextField("수량", "");
+  if (buy) al.addTextField(`매수 단가 (${cur})`, "");
+  al.addAction(buy ? "매수 반영" : "매도 반영");
+  al.addCancelAction("취소");
+  if ((await al.presentAlert()) < 0) return false;
+  const q = num(al.textFieldValue(0));
+  const fail = async (msg) => {
+    const e = new Alert();
+    e.title = "입력 확인";
+    e.message = msg;
+    e.addAction("확인");
+    await e.presentAlert();
+    return false;
+  };
+  if (!(q > 0)) return fail("수량을 숫자로 입력해 주세요.");
+  if (buy) {
+    const pr = num(al.textFieldValue(1));
+    if (!(pr > 0)) return fail("매수 단가를 숫자로 입력해 주세요.");
+    const old = Number(it.qty) || 0;
+    const oldAvg = it.avgCost != null ? Number(it.avgCost) : pr;
+    it.avgCost = Math.round(((old * oldAvg + q * pr) / (old + q)) * 100) / 100;
+    if (it.costKRW != null) {
+      const fx = cur === BASE ? 1 : (db.fx[cur] && db.fx[cur].rate) || 0;
+      it.costKRW = Math.round(it.costKRW + q * pr * fx);
+    }
+    it.qty = old + q;
+  } else {
+    if (q > it.qty) return fail(`보유 수량(${it.qty})보다 많이 매도할 수 없습니다.`);
+    if (it.costKRW != null && it.qty) it.costKRW = Math.round((it.costKRW * (it.qty - q)) / it.qty);
+    it.qty = Math.round((it.qty - q) * 1e6) / 1e6;
+    if (it.qty === 0) {
+      const c = new Alert();
+      c.title = "전부 매도했습니다";
+      c.message = `${it.name} 항목을 목록에서 삭제할까요?`;
+      c.addDestructiveAction("삭제");
+      c.addCancelAction("0주로 남겨두기");
+      if ((await c.presentAlert()) === 0) db.items = db.items.filter((x) => x.id !== it.id);
+    }
+  }
+  saveDB(db);
+  return true;
+}
+
 async function editItem(db, item) {
   const isNew = !item;
   const it = Object.assign({ type: "stock", currency: BASE, qty: 0 }, item);
@@ -552,6 +623,9 @@ async function editItem(db, item) {
     if (idx < 0) return false;
     it.type = TYPES[idx].key;
     it.id = String(Date.now());
+    const acc = await pickAccount(db, null);
+    if (acc === null) return false;
+    if (acc) it.account = acc;
   }
 
   const t = TYPES.find((x) => x.key === it.type);
@@ -591,25 +665,41 @@ async function editItem(db, item) {
 }
 
 async function itemMenu(db, row) {
+  const it = row.it;
   const a = new Alert();
-  a.title = row.it.name;
-  a.message = `${row.it.qty.toLocaleString()} × ${money(row.price, row.cur)}  =  ${money(row.value)}`;
-  a.addAction("수정");
+  a.title = it.name;
+  a.message = `${it.account ? it.account + "\n" : ""}${Number(it.qty).toLocaleString()} × ${money(row.price, row.cur)}  =  ${money(row.value)}`;
+  const acts = [];
+  const add = (label, fn) => {
+    a.addAction(label);
+    acts.push(fn);
+  };
+  if (it.type === "stock" || it.type === "crypto") {
+    add("추가 매수", () => trade(db, it, true));
+    add("매도", () => trade(db, it, false));
+  }
+  add("수정", () => editItem(db, it));
+  add("계좌 변경", async () => {
+    const acc = await pickAccount(db, it.account);
+    if (acc === null) return false;
+    it.account = acc;
+    saveDB(db);
+    return true;
+  });
   a.addDestructiveAction("삭제");
   a.addCancelAction("닫기");
   const r = await a.presentSheet();
-  if (r === 0) return editItem(db, row.it);
-  if (r === 1) {
-    const c = new Alert();
-    c.title = "삭제할까요?";
-    c.message = row.it.name;
-    c.addDestructiveAction("삭제");
-    c.addCancelAction("취소");
-    if ((await c.presentAlert()) === 0) {
-      db.items = db.items.filter((x) => x.id !== row.it.id);
-      saveDB(db);
-      return true;
-    }
+  if (r < 0) return false;
+  if (r < acts.length) return acts[r]();
+  const c = new Alert();
+  c.title = "삭제할까요?";
+  c.message = it.name;
+  c.addDestructiveAction("삭제");
+  c.addCancelAction("취소");
+  if ((await c.presentAlert()) === 0) {
+    db.items = db.items.filter((x) => x.id !== it.id);
+    saveDB(db);
+    return true;
   }
   return false;
 }
