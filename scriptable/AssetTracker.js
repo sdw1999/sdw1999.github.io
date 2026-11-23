@@ -9,7 +9,19 @@
 // - 시세는 Yahoo Finance 를 사용합니다. (주식/ETF/코인/환율)
 //     한국주식: 005930.KS(코스피) / 035720.KQ(코스닥)   미국주식: AAPL, QQQ
 //     코인: BTC-USD   환율은 자동 조회 (USD→KRW 등)
+//
+// 버전 (수정 날짜) — 아래 VERSION 과 앱 화면 맨 아래 "버전" 표시가 같으면 최신입니다.
+// 스크립트를 바꿔도 데이터(assets.json)는 그대로 유지됩니다.
+//
+// 변경 이력
+//   2026-11-23  새 종목 추가 시 계좌 선택, 계좌 변경, 추가 매수/매도(평균 매입가 자동 계산)
+//   2026-10-28  나이·투자성향 설정(방어력 기준 조절), 월별 스냅샷에 점수 저장
+//   2026-10-10  종합 점수 카드, "Claude에게 평가 요청"(요약 복사)
+//   2026-10-09  일간 변동률 오류 수정 (5거래일 전 종가 → 전일 종가)
+//   2026-10-05  최초 작성: 계좌별 목록, 시세 점검, JSON 가져오기(추가/덮어쓰기),
+//               국내/해외 구분, 달러 기준 등락률, 포트폴리오 분석, 월별 자산 추이
 
+const VERSION = "2026-11-23";
 const FILE = "assets.json";
 const BASE = "KRW";
 const TYPES = [
@@ -966,7 +978,7 @@ function render(table, db) {
   const foot = new UITableRow();
   foot.height = 40;
   const when = db.updated ? new Date(db.updated).toLocaleString("ko-KR") : "-";
-  foot.addCell(cell(`마지막 갱신: ${when}`, { color: COLORS.mute, size: 11 }));
+  foot.addCell(cell(`마지막 갱신: ${when} · 버전 ${VERSION}`, { color: COLORS.mute, size: 11 }));
   table.addRow(foot);
 }
 
