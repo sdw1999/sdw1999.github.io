@@ -14,6 +14,7 @@
 // 스크립트를 바꿔도 데이터(assets.json)는 그대로 유지됩니다.
 //
 // 변경 이력
+//   2026-11-28  버그 수정: 여러 번 수정하면 다음 항목 탭이 먹히지 않던 문제 (수정 후 전체 시세 재조회 제거)
 //   2026-11-23  새 종목 추가 시 계좌 선택, 계좌 변경, 추가 매수/매도(평균 매입가 자동 계산)
 //   2026-10-28  나이·투자성향 설정(방어력 기준 조절), 월별 스냅샷에 점수 저장
 //   2026-10-10  종합 점수 카드, "Claude에게 평가 요청"(요약 복사)
@@ -21,7 +22,7 @@
 //   2026-10-05  최초 작성: 계좌별 목록, 시세 점검, JSON 가져오기(추가/덮어쓰기),
 //               국내/해외 구분, 달러 기준 등락률, 포트폴리오 분석, 월별 자산 추이
 
-const VERSION = "2026-11-23";
+const VERSION = "2026-11-28";
 const FILE = "assets.json";
 const BASE = "KRW";
 const TYPES = [
@@ -853,6 +854,66 @@ function cell(text, opts = {}) {
   return c;
 }
 
+// ---------- 화면 갱신 제어 ----------
+// [버그 수정 2026-11-28] 수정할 때마다 전체 시세(40여 종목)를 다시 받아오느라 탭 처리가 몇 초~10초 넘게
+// 끝나지 않았고, 그 사이 다음 탭이 무시되거나, 알림창이 열려 있는 동안 백그라운드 새로고침이 표를
+// 다시 그려 탭이 먹히지 않는 상태가 될 수 있었다.
+// - 수정/추가/삭제 후에는 네트워크를 기다리지 않고 저장된 시세로 바로 다시 그린다.
+// - 시세가 없는 종목(새 종목·심볼 변경)만 백그라운드로 조회한다.
+// - 알림창이 열려 있는 동안(busy)에는 표를 다시 그리지 않고, 창이 닫힌 뒤 한 번에 그린다.
+const ui = { busy: false, pending: false, refreshing: false };
+
+function redraw(table, db) {
+  if (ui.busy) {
+    ui.pending = true;
+    return;
+  }
+  ui.pending = false;
+  render(table, db);
+  table.reload();
+}
+
+// 알림창 흐름(수정·추가·도구·분석)을 한 번에 하나만 실행하고, 끝나면 즉시 다시 그림
+async function interact(table, db, fn) {
+  if (ui.busy) return;
+  ui.busy = true;
+  let changed = false;
+  try {
+    changed = await fn();
+  } catch (e) {
+    console.error(e);
+  } finally {
+    ui.busy = false;
+  }
+  if (changed || ui.pending) redraw(table, db);
+  if (changed) fetchMissing(table, db);
+}
+
+// 시세나 환율이 아직 없는 것만 백그라운드로 조회
+function fetchMissing(table, db) {
+  const syms = [...new Set(db.items.filter((i) => TYPES.find((t) => t.key === i.type)?.live && i.symbol && !db.cache[i.symbol]).map((i) => i.symbol))];
+  const curs = [...new Set(db.items.map((i) => i.currency).filter((c) => c && c !== BASE && !db.fx[c]))];
+  if (!syms.length && !curs.length) return;
+  const jobs = syms.map((sym) => yahoo(sym).then((q) => (db.cache[sym] = q)).catch(() => {}));
+  curs.forEach((c) => jobs.push(yahoo(`${c}${BASE}=X`).then((q) => (db.fx[c] = { rate: q.price, prev: q.prev })).catch(() => {})));
+  Promise.all(jobs).then(() => {
+    saveDB(db);
+    redraw(table, db);
+  });
+}
+
+// 전체 시세 새로고침 (백그라운드, 동시에 하나만)
+function refreshInBackground(table, db) {
+  if (ui.refreshing) return;
+  ui.refreshing = true;
+  refresh(db)
+    .catch((e) => console.error(e))
+    .then(() => {
+      ui.refreshing = false;
+      redraw(table, db);
+    });
+}
+
 const collapsed = new Set();
 function render(table, db) {
   const s = calc(db);
@@ -878,37 +939,25 @@ function render(table, db) {
   const bar = new UITableRow();
   bar.height = 48;
   const add = UITableCell.button("＋ 추가");
-  add.onTap = async () => {
-    if (await editItem(db, null)) {
-      await refresh(db);
-      render(table, db);
-      table.reload();
-    }
-  };
+  add.onTap = () => interact(table, db, () => editItem(db, null));
   const ref = UITableCell.button("↻ 새로고침");
-  ref.onTap = async () => {
-    await refresh(db);
-    render(table, db);
-    table.reload();
-  };
+  ref.onTap = () => refreshInBackground(table, db);
   const tools = UITableCell.button("⋯ 도구");
-  tools.onTap = async () => {
-    await toolsMenu(db);
-    render(table, db);
-    table.reload();
-  };
+  tools.onTap = () =>
+    interact(table, db, async () => {
+      await toolsMenu(db);
+      return true;
+    });
   const rep = UITableCell.button("📊 분석");
-  rep.onTap = async () => {
-    await showReport(db);
-  };
+  rep.onTap = () =>
+    interact(table, db, async () => {
+      await showReport(db);
+      return false;
+    });
   [add, ref, rep, tools].forEach((c) => bar.addCell(c));
   table.addRow(bar);
 
   const sorted = [...s.rows];
-  const rerender = () => {
-    render(table, db);
-    table.reload();
-  };
   for (const a of s.accList) {
     const open = !collapsed.has(a.name);
     const share = s.total ? ((a.value / s.total) * 100).toFixed(1) : "0.0";
@@ -922,7 +971,7 @@ function render(table, db) {
     head2.onSelect = () => {
       if (collapsed.has(a.name)) collapsed.delete(a.name);
       else collapsed.add(a.name);
-      rerender();
+      redraw(table, db);
     };
     table.addRow(head2);
     if (!open) continue;
@@ -946,12 +995,7 @@ function render(table, db) {
       const subText = noPrice ? " " : foreign ? `${r.cur} ${pct(r.localDayPct)}` : "오늘";
       row.addCell(cell(noPrice ? " " : pct(dayPct), { sub: subText, color: colorOf(r.day), subColor: foreign && !noPrice ? colorOf(r.localDayPct) : COLORS.mute, right: true, weight: 3, size: 14 }));
       row.addCell(cell(money(r.value, BASE, h), { sub: noPrice ? " " : `손익 ${pct(plPct)}`, subColor: colorOf(r.pl), right: true, weight: 5, size: 15 }));
-      row.onSelect = async () => {
-        if (await itemMenu(db, r)) {
-          await refresh(db);
-          rerender();
-        }
-      };
+      row.onSelect = () => interact(table, db, () => itemMenu(db, r));
       table.addRow(row);
     };
     for (const g of split ? GROUPS : [null]) {
@@ -1043,10 +1087,7 @@ if (config.runsInWidget) {
   table.showSeparators = true;
   render(table, db);
   const presented = table.present(false);
-  refresh(db).then(() => {
-    render(table, db);
-    table.reload();
-  });
+  refreshInBackground(table, db);
   await presented;
 }
 Script.complete();
